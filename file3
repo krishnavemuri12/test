@@ -1,0 +1,51 @@
+pipeline {
+    agent {
+        label "${getAgentLabel(params.gcpProject)}"
+    }
+    parameters {
+        choice(name: 'gcpProject', choices: ['project1', 'project2', 'project3'], description: 'Select GCP project')
+    }
+    stages {
+        stage('List VMs') {
+            steps {
+                script {
+                    def gcp = new com.google.cloud.tools.jenkins.GoogleCloudBuilder()
+                    gcp.withGoogleCloud {
+                        def compute = services.compute()
+                        def instanceGroupManager = compute.instanceGroupManagers()
+                        def instanceGroups = instanceGroupManager.list().iterateAll()
+
+                        def instances = []
+                        for (instanceGroup in instanceGroups) {
+                            def instancesInGroup = compute.instances().list(instanceGroup.getZone(), instanceGroup.getName()).iterateAll()
+                            instances.addAll(instanceGroup)
+                        }
+
+                        def table = new Table(header: ['Instance Name', 'Image', 'Creation Date'])
+                        for (instance in instances) {
+                            def image = compute.images().get(instance.getMachineType().getImage()).getName()
+                            def creationDate = new Date(instance.getCreationTimestamp())
+                            table.addRow([instance.getName(), image, creationDate.format('yyyy-MM-dd HH:mm:ss')])
+                        }
+
+                        println table.render()
+                    }
+                }
+            }
+        }
+    }
+}
+
+def getAgentLabel(gcpProject) {
+    // Replace with your mapping logic
+    switch (gcpProject) {
+        case 'project1':
+            return 'agent-label-for-project1'
+        case 'project2':
+            return 'agent-label-for-project2'
+        case 'project3':
+            return 'agent-label-for-project3'
+        default:
+            error "Unknown GCP project: ${gcpProject}"
+    }
+}
