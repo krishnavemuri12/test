@@ -1,0 +1,72 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'SOURCE_GCS_BUCKET', defaultValue: 'gs://your-source-bucket', description: 'Source GCS bucket path')
+        string(name: 'DESTINATION_GCS_BUCKET', defaultValue: 'gs://your-destination-bucket', description: 'Destination GCS bucket path')
+        string(name: 'GPG_RECIPIENT', defaultValue: 'alice@example.com', description: 'GPG recipient email address')
+    }
+
+    environment {
+        GPG_HOME = "${WORKSPACE}/.gnupg" // Define the GPG home directory within the workspace
+    }
+
+    stages {
+        stage('Import GPG Key') {
+            steps {
+                script {
+                    // Create the GPG home directory and set appropriate permissions
+                    sh '''
+                    mkdir -p ${GPG_HOME}  # Create the GPG home directory if it doesn't exist
+                    chmod 700 ${GPG_HOME} # Set directory permissions to be accessible only by the owner
+                    
+                    # Import the GPG key from a specified key file
+                    gpg --homedir ${GPG_HOME} --import /path/to/gpg-key-file.asc
+                    
+                    # List the imported GPG keys for verification
+                    keysOutput=$(gpg --homedir ${GPG_HOME} --list-keys)
+                    
+                    # Mask the output for sensitive information
+                    maskedOutput=$(echo "$keysOutput" | sed 's/[^ ]/****/g')
+                    
+                    echo "GPG Keys List (masked):"
+                    echo "$maskedOutput"
+                    '''
+                }
+            }
+        }
+
+        stage('Encrypt and Upload Files') {
+            steps {
+                script {
+                    // List files in the source GCS bucket and process each one
+                    sh '''
+                    # List all files in the source GCS bucket
+                    gsutil ls ${SOURCE_GCS_BUCKET}/* | while read file; do
+                        # Copy the file from GCS to the local workspace
+                        gsutil cp "$file" .
+
+                        # Extract the filename from the full path
+                        filename=$(basename "$file")
+
+                        # Encrypt the file using GPG
+                        gpg --homedir ${GPG_HOME} --output "${filename}.gpg" --encrypt --recipient ${GPG_RECIPIENT} "$filename"
+
+                        # Copy the encrypted file to the destination GCS bucket
+                        gsutil cp "${filename}.gpg" ${DESTINATION_GCS_BUCKET}/
+
+                        # Remove the local copies of the original and encrypted files
+                        rm "$filename" "${filename}.gpg"
+                    done
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            echo 'Pipeline execution completed.'
+        }
+    }
+}
