@@ -1,0 +1,58 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'SOURCE_GCS_BUCKET', defaultValue: 'gs://your-source-bucket', description: 'Source GCS bucket path')
+        string(name: 'DESTINATION_GCS_BUCKET', defaultValue: 'gs://your-destination-bucket', description: 'Destination GCS bucket path')
+        string(name: 'GPG_RECIPIENT', defaultValue: 'alice@example.com', description: 'GPG recipient email address')
+    }
+
+    environment {
+        GPG_HOME = "${WORKSPACE}/.gnupg" // Define the GPG home directory within the workspace
+    }
+
+    stages {
+        stage('Import GPG Key') {
+            steps {
+                script {
+                    // Import GPG Key
+                    sh '''
+                    mkdir -p ${GPG_HOME}
+                    chmod 700 ${GPG_HOME}
+                    gpg --homedir ${GPG_HOME} --import /path/to/gpg-key-file.asc
+                    gpg --homedir ${GPG_HOME} --list-keys
+                    '''
+                }
+            }
+        }
+
+        stage('Download Files') {
+            steps {
+                script {
+                    sh '''
+                    gsutil -m rsync ${params.SOURCE_GCS_BUCKET} .
+                    '''
+                }
+            }
+        }
+
+        stage('Encrypt and Upload Files') {
+            steps {
+                script {
+                    sh '''
+                    for file in *; do
+                        if [[ -f "$file" ]]; then
+                            filename=$(basename "$file")
+                            encrypted_file="${filename}.gpg"
+
+                            gpg --homedir ${GPG_HOME} --output "$encrypted_file" --encrypt --recipient ${params.GPG_RECIPIENT} "$file"
+                            gsutil cp "$encrypted_file" ${params.DESTINATION_GCS_BUCKET}/
+                            rm "$encrypted_file"
+                        fi
+                    done
+                    '''
+                }
+            }
+        }
+    }
+}
