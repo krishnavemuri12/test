@@ -7,13 +7,33 @@ pipeline {
         string(name: 'GPG_RECIPIENT', defaultValue: 'recipient@example.com', description: 'GPG recipient email address')
     }
 
+    environment {
+        GPG_HOME = "${WORKSPACE}/.gnupg" // Define the GPG home directory within the workspace
+    }
+
     stages {
         stage('Import GPG Key') {
             steps {
                 script {
-                    // Import the GPG key from a key file stored in Jenkins
+                    // Import GPG Key
                     sh '''
-                    gpg --import /path/to/gpg-key-file.asc
+                    # Create the GPG home directory if it doesn't exist
+                    mkdir -p ${GPG_HOME}
+                    
+                    # Set directory permissions to be accessible only by the owner
+                    chmod 700 ${GPG_HOME}
+                    
+                    # Import the GPG key from a specified key file
+                    gpg --homedir ${GPG_HOME} --import /path/to/gpg-key-file.asc
+                    
+                    # List the imported GPG keys for verification
+                    keysOutput=$(gpg --homedir ${GPG_HOME} --list-keys)
+                    
+                    # Mask the output for sensitive information
+                    maskedOutput=$(echo "$keysOutput" | sed 's/[^ ]/****/g')
+                    
+                    echo "GPG Keys List (masked):"
+                    echo "$maskedOutput"
                     '''
                 }
             }
@@ -22,17 +42,21 @@ pipeline {
         stage('Encrypt and Upload Files') {
             steps {
                 script {
-                    // List files in the source GCS bucket and process each one
+                    // List files in the source GCS bucket, download, encrypt, and upload them
                     sh '''
-                    gsutil ls ${SOURCE_GCS_BUCKET}/* | while read file; do
-                        # Copy the file to the local workspace
+                    # Set IFS to newline to correctly handle spaces in filenames
+                    IFS=$'\n'
+
+                    # List all files in the source GCS bucket
+                    for file in $(gsutil -q ls ${SOURCE_GCS_BUCKET}/*); do
+                        # Copy the file from GCS to the local workspace
                         gsutil cp "$file" .
 
-                        # Extract the filename from the full path
-                        filename=$(echo "$file" | rev | cut -d'/' -f1 | rev)
+                        # Extract the filename from the full path without using basename
+                        filename="${file##*/}"
 
                         # Encrypt the file using GPG
-                        gpg --output "${filename}.gpg" --encrypt --recipient ${GPG_RECIPIENT} "$filename"
+                        gpg --homedir ${GPG_HOME} --output "${filename}.gpg" --encrypt --recipient ${GPG_RECIPIENT} "$filename"
 
                         # Copy the encrypted file to the destination GCS bucket
                         gsutil cp "${filename}.gpg" ${DESTINATION_GCS_BUCKET}/
@@ -52,8 +76,3 @@ pipeline {
         }
     }
 }
-
-                    sed -E '
-                    s/(pub\s+)(rsa2048\s+[^\s]+\s+\[SC\]\s+\[expires: [^\]]+\]\n\s+)([A-F0-9]{16}[A-F0-9]{16})/\1\2****/;
-                    s/(uid\s+\[ultimate\]\s+)([^<]+)(<[^>]+>)/\1****\3/
-                    '
