@@ -4,66 +4,60 @@ pipeline {
     parameters {
         string(name: 'SOURCE_GCS_BUCKET', defaultValue: 'gs://your-source-bucket', description: 'Source GCS bucket path')
         string(name: 'DESTINATION_GCS_BUCKET', defaultValue: 'gs://your-destination-bucket', description: 'Destination GCS bucket path')
-        string(name: 'GPG_RECIPIENT', defaultValue: 'recipient@example.com', description: 'GPG recipient email address')
     }
 
     environment {
         GPG_HOME = "${WORKSPACE}/.gnupg" // Define the GPG home directory within the workspace
+        GPG_RECIPIENT_CRED = credentials('gpg-recipient') // Jenkins credential ID for the GPG recipient
+        TMP_DIR = "${WORKSPACE}/tmp" // Temporary directory for processing files
+        GPG_KEY_PATH = "gs://your-source-bucket/gpg-key-file.asc" // Path to the GPG key file in GCS
     }
 
     stages {
-        stage('Import GPG Key') {
+        stage('Setup and Import GPG Key') {
             steps {
                 script {
-                    // Import GPG Key
+                    // Download and import the GPG key file from the GCS bucket
                     sh '''
-                    # Create the GPG home directory if it doesn't exist
-                    mkdir -p ${GPG_HOME}
-                    
-                    # Set directory permissions to be accessible only by the owner
-                    chmod 700 ${GPG_HOME}
-                    
-                    # Import the GPG key from a specified key file
-                    gpg --homedir ${GPG_HOME} --import /path/to/gpg-key-file.asc
-                    
-                    # List the imported GPG keys for verification
-                    keysOutput=$(gpg --homedir ${GPG_HOME} --list-keys)
-                    
-                    # Mask the output for sensitive information
-                    maskedOutput=$(echo "$keysOutput" | sed 's/[^ ]/****/g')
-                    
-                    echo "GPG Keys List (masked):"
-                    echo "$maskedOutput"
+                    mkdir -p ${GPG_HOME} ${TMP_DIR} # Create GPG home and temporary directories
+                    chmod 700 ${GPG_HOME}           # Set GPG home directory permissions
+                    gsutil cp ${GPG_KEY_PATH} ${TMP_DIR}/ # Download the GPG key file from GCS
+                    gpg --homedir ${GPG_HOME} --import ${TMP_DIR}/gpg-key-file.asc # Import the GPG key
+                    rm ${TMP_DIR}/gpg-key-file.asc   # Remove the key file after import
                     '''
                 }
             }
         }
 
-        stage('Encrypt and Upload Files') {
+        stage('Download, Encrypt, and Upload Files') {
             steps {
                 script {
-                    // List files in the source GCS bucket, download, encrypt, and upload them
+                    // Download, encrypt, and upload files sequentially
                     sh '''
-                    # Set IFS to newline to correctly handle spaces in filenames
-                    IFS=$'\n'
+                    # Create a list of files from the source GCS bucket
+                    gsutil ls ${SOURCE_GCS_BUCKET}/* > ${TMP_DIR}/file_list.txt
 
-                    # List all files in the source GCS bucket
-                    for file in $(gsutil -q ls ${SOURCE_GCS_BUCKET}/*); do
-                        # Copy the file from GCS to the local workspace
-                        gsutil cp "$file" .
+                    # Download and process each file
+                    while read -r file; do
+                        # Extract the filename from the path
+                        filename=$(basename "$file")
+                        echo "Downloading $file..."
+                        gsutil cp "$file" ${TMP_DIR}/
 
-                        # Extract the filename from the full path without using basename
-                        filename="${file##*/}"
+                        # Encrypt the file
+                        echo "Encrypting ${TMP_DIR}/${filename}..."
+                        gpg --homedir ${GPG_HOME} --output "${TMP_DIR}/${filename}.gpg" --encrypt --recipient "${GPG_RECIPIENT_CRED}" "${TMP_DIR}/${filename}"
 
-                        # Encrypt the file using GPG
-                        gpg --homedir ${GPG_HOME} --output "${filename}.gpg" --encrypt --recipient ${GPG_RECIPIENT} "$filename"
+                        # Upload the encrypted file
+                        echo "Uploading ${TMP_DIR}/${filename}.gpg to ${DESTINATION_GCS_BUCKET}..."
+                        gsutil cp "${TMP_DIR}/${filename}.gpg" ${DESTINATION_GCS_BUCKET}
 
-                        # Copy the encrypted file to the destination GCS bucket
-                        gsutil cp "${filename}.gpg" ${DESTINATION_GCS_BUCKET}/
+                        # Clean up files after processing
+                        rm "${TMP_DIR}/${filename}" "${TMP_DIR}/${filename}.gpg"
+                    done < ${TMP_DIR}/file_list.txt
 
-                        # Remove the local copies of the original and encrypted files
-                        rm "$filename" "${filename}.gpg"
-                    done
+                    # Clean up the temporary directory
+                    rm -rf ${TMP_DIR}
                     '''
                 }
             }
