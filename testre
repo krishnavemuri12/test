@@ -78,3 +78,13 @@ pipeline {
 }
 
 value=$(jq -r --arg key "$extracted_text" '.[$key]' ${TMP_DIR}/key_value_pair.json)
+# Convert the key-value pair string to JSON format
+                    echo "${KEY_VALUE_PAIR}" | awk -F, '{
+                        printf "{"
+                        for (i = 1; i <= NF; i++) {
+                            split($i, kv, ":")
+                            printf "\\"%s\\": \\"%s\\"", kv[1], kv[2]
+                            if (i < NF) printf ","
+                        }
+                        printf "}"
+                    }' > ${TMP_DIR}/key_value_pair.json
