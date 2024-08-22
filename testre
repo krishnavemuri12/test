@@ -1,0 +1,78 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'SOURCE_GCS_BUCKET', defaultValue: '', description: 'Source GCS bucket path')
+        string(name: 'DEST_GCS_BUCKET', defaultValue: '', description: 'Destination GCS bucket path')
+        string(name: 'KEY_VALUE_PAIR', defaultValue: '', description: 'Key-Value pairs in the format "key1:value1,key2:value2"')
+    }
+
+    environment {
+        GPG_HOME = "${WORKSPACE}/.gnupg" // Define the GPG home directory within the workspace
+        TMP_DIR = "${WORKSPACE}/tmp"     // Temporary directory for file processing
+    }
+
+    stages {
+        stage('Import GPG Key') {
+            steps {
+                script {
+                    sh '''
+                    mkdir -p ${GPG_HOME}  # Create the GPG home directory if it doesn't exist
+                    chmod 700 ${GPG_HOME} # Set directory permissions to be accessible only by the owner
+
+                    # Download the GPG key file from GCS bucket to workspace
+                    gsutil cp gs://your-gcs-bucket-path/gpg-key-file.asc ${WORKSPACE}/gpg-key-file.asc
+
+                    # Import the GPG key
+                    gpg --homedir ${GPG_HOME} --import ${WORKSPACE}/gpg-key-file.asc
+
+                    # Clean up the GPG key file after import
+                    rm ${WORKSPACE}/gpg-key-file.asc
+                    '''
+                }
+            }
+        }
+
+        stage('Download and Encrypt Files') {
+            steps {
+                script {
+                    // Convert the key-value pair string to JSON format
+                    def keyValuePairs = params.KEY_VALUE_PAIR.split(',').collectEntries { entry ->
+                        def (key, value) = entry.split(':')
+                        [(key): value]
+                    }
+                    def keyValueJson = new groovy.json.JsonBuilder(keyValuePairs).toString()
+
+                    // Write the key-value pair JSON to a file
+                    writeFile file: "${TMP_DIR}/key_value_pair.json", text: keyValueJson
+
+                    sh '''
+                    mkdir -p ${TMP_DIR}  # Create a temporary directory for file processing
+
+                    # Download files from the source GCS bucket to the workspace
+                    gsutil ls ${SOURCE_GCS_BUCKET}/* | tail -n +2 > ${TMP_DIR}/file_list.txt
+                    gsutil -m cp -r ${SOURCE_GCS_BUCKET}/* ${TMP_DIR}/
+
+                    # List and process each file
+                    cat ${TMP_DIR}/file_list.txt | while read file; do
+                        # Extract the filename
+                        filename=$(basename "$file")
+
+                        # Extract the text between the second and third underscore
+                        extracted_text=$(echo "$filename" | awk -F'_' '{print $3}')
+
+                        # Get the corresponding value from the key-value pair using jq
+                        value=$(jq -r --arg key "$extracted_text" '.[$key]' ${TMP_DIR}/key_value_pair.json)
+
+                        # Encrypt the file
+                        gpg --homedir ${GPG_HOME} --output ${TMP_DIR}/${value}_${filename}.pgp --encrypt --recipient your-recipient-email@example.com ${TMP_DIR}/$filename
+
+                        # Copy the encrypted file to the destination GCS bucket
+                        gsutil cp ${TMP_DIR}/${value}_${filename}.pgp ${DEST_GCS_BUCKET}/
+                    done
+                    '''
+                }
+            }
+        }
+    }
+}
