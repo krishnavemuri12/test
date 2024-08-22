@@ -1,0 +1,83 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'SOURCE_GCS_BUCKET', defaultValue: 'gs://your-source-bucket', description: 'Source GCS bucket path')
+        string(name: 'DESTINATION_GCS_BUCKET', defaultValue: 'gs://your-destination-bucket', description: 'Destination GCS bucket path')
+        string(name: 'KEY_VALUE_PAIR', defaultValue: '{"test": "cbim"}', description: 'Key-value pair in JSON format')
+    }
+
+    environment {
+        GPG_HOME = "${WORKSPACE}/.gnupg" // Define the GPG home directory within the workspace
+        TMP_DIR = "${WORKSPACE}/tmp"     // Temporary directory for file processing
+    }
+
+    stages {
+        stage('Import GPG Key') {
+            steps {
+                script {
+                    sh '''
+                    mkdir -p ${GPG_HOME}  # Create the GPG home directory if it doesn't exist
+                    chmod 700 ${GPG_HOME} # Set directory permissions to be accessible only by the owner
+
+                    # Download the GPG key file from GCS bucket to workspace
+                    gsutil cp gs://your-gcs-bucket-path/gpg-key-file.asc ${WORKSPACE}/gpg-key-file.asc
+
+                    # Import the GPG key
+                    gpg --homedir ${GPG_HOME} --import ${WORKSPACE}/gpg-key-file.asc
+
+                    # Clean up the GPG key file after import
+                    rm ${WORKSPACE}/gpg-key-file.asc
+                    '''
+                }
+            }
+        }
+
+        stage('Download and Encrypt Files') {
+            steps {
+                script {
+                    // Parse the key-value pair
+                    def keyValue = readJSON text: params.KEY_VALUE_PAIR
+
+                    sh '''
+                    mkdir -p ${TMP_DIR}  # Create a temporary directory for file processing
+
+                    # Download files from the source GCS bucket to the workspace
+                    gsutil ls ${SOURCE_GCS_BUCKET}/* | tail -n +2 > ${TMP_DIR}/file_list.txt
+                    gsutil -m cp -r ${SOURCE_GCS_BUCKET}/* ${TMP_DIR}/
+
+                    # List and process each file
+                    cat ${TMP_DIR}/file_list.txt | while read file; do
+                        # Extract the filename
+                        filename=$(basename "$file")
+
+                        # Extract the text between the second and third underscore
+                        extracted_text=$(echo "$filename" | awk -F'_' '{print $3}')
+
+                        # Get the value corresponding to the extracted text
+                        key_value="${keyValue[${extracted_text}]}"
+
+                        # Create the encrypted output file name
+                        encrypted_file="${key_value}_${filename}.pgp"
+
+                        # Encrypt the file
+                        gpg --homedir ${GPG_HOME} --output "${WORKSPACE}/${encrypted_file}" --encrypt --recipient ${key_value} "${TMP_DIR}/${filename}"
+
+                        # Upload the encrypted file to the destination GCS bucket
+                        gsutil cp "${WORKSPACE}/${encrypted_file}" ${DESTINATION_GCS_BUCKET}/
+                    done
+
+                    # Clean up temporary directory
+                    rm -rf ${TMP_DIR}
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            echo 'Pipeline execution completed.'
+        }
+    }
+}
