@@ -76,3 +76,5 @@ pipeline {
         }
     }
 }
+
+value=$(jq -r --arg key "$extracted_text" '.[$key]' ${TMP_DIR}/key_value_pair.json)
