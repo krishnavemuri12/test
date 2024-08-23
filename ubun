@@ -1,0 +1,75 @@
+#!/bin/bash
+
+# Define variables
+SOURCE_GCS_BUCKET="gs://gfs-canada-it-billing-uat/pbim-report/PBIMReport/2024-6"
+DESTINATION_GCS_BUCKET="gs://can-secure-key-uat/test"
+KEY_VALUE_PAIR='{"PBIMCIVILFORFEITURE": "COMMERCE82053", "PBIMMINSMALLBREVRMBV": "COMMERCE65053"}'
+GPG_DIR="$HOME/.gnupg"
+TMP_DIR="/tmp/gcs_processing"
+GPG_KEY_PATH="gs://gfs-canada-it-billing-uat/pbim-report/keys/Fortress_UAT_PGP.key"
+GPG_RECIPIENT="your-gpg-recipient@example.com" # Replace with your actual GPG recipient
+
+# Install necessary tools
+sudo apt-get update
+sudo apt-get install -y jq
+curl https://sdk.cloud.google.com | bash
+exec -l $SHELL
+gcloud init
+
+# Setup and import GPG key
+mkdir -p "${GPG_DIR}" "${TMP_DIR}"
+gsutil cp "${GPG_KEY_PATH}" "${TMP_DIR}/" # Download the GPG key file from GCS
+gpg --homedir "${GPG_DIR}" --import "${TMP_DIR}/Fortress_UAT_PGP.key" # Import the GPG key
+ls -l "${TMP_DIR}/"
+rm "${TMP_DIR}/Fortress_UAT_PGP.key"   # Remove the key file after import
+
+# Parse the key-value pair
+keyValueJson=$(echo "${KEY_VALUE_PAIR}" | jq -c '.')
+
+# Download, encrypt, and upload files sequentially
+if [ ! -d "${TMP_DIR}" ]; then
+    mkdir -p "${TMP_DIR}"
+fi
+
+# Create a list of files from the source GCS bucket
+gsutil ls "${SOURCE_GCS_BUCKET}/*" | tail -n +2 > "${TMP_DIR}/file_list.txt"
+cat "${TMP_DIR}/file_list.txt"
+
+# Download and process each file
+while read -r file; do
+    # Extract the filename from the path
+    filename=$(basename "$file")
+
+    echo "Downloading $file..."
+    gsutil cp "$file" "${TMP_DIR}/"
+
+    # Extract the text between the second and third underscore
+    extracted_text=$(echo "$filename" | awk -F'_' '{print $3}')
+
+    # Get the value corresponding to the extracted text
+    value=$(echo "${keyValueJson}" | jq -r --arg key "$extracted_text" '.[$key]' 2>/dev/null)
+    # Display the value in the console output
+    echo "Value: $value"
+
+    # Create the encrypted output file name
+    encrypted_file="${value}_${filename}.pgp"
+
+    # Encrypt the file
+    echo "Encrypting ${TMP_DIR}/${filename}..."
+    gpg --homedir "${GPG_DIR}" --trust-model always --output "${TMP_DIR}/${filename}.pgp" --encrypt --openpgp --recipient "${GPG_RECIPIENT}" "${TMP_DIR}/${filename}"
+
+    # Upload the encrypted file
+    echo "Uploading ${TMP_DIR}/${filename}.pgp to ${DESTINATION_GCS_BUCKET}..."
+    gsutil cp "${TMP_DIR}/${filename}.pgp" "${DESTINATION_GCS_BUCKET}/"
+
+    # Clean up files after processing
+    rm "${TMP_DIR}/${filename}" "${TMP_DIR}/${filename}.pgp"
+    
+    echo "-------------------------------------------------------"
+    echo "-------------------------------------------------------"
+done < "${TMP_DIR}/file_list.txt"
+
+# Clean up the temporary directory
+rm -rf "${TMP_DIR}"
+
+echo 'Script execution completed successfully.'
