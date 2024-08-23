@@ -1,0 +1,97 @@
+pipeline {
+    agent {
+        label ""
+    }
+
+    parameters {
+        string(name: 'SOURCE_GCS_BUCKET', defaultValue: '', description: 'Source GCS bucket path')
+        string(name: 'DESTINATION_GCS_BUCKET', defaultValue: '', description: 'Destination GCS bucket path')
+        string(name: 'KEY_VALUE_PAIR', description: 'Key-value pair in JSON format', defaultValue: '')
+    }
+
+    environment {
+        GPG_DIR = "${WORKSPACE}/.gnupg"
+        GPG_CRED = credentials('gpg-recipient-pbim-uat')
+        TMP_DIR = "${WORKSPACE}/tmp"
+        GPG_KEY_PATH = ""
+    }
+
+    stages {
+        stage('Setup and Import GPG Key') {
+            steps {
+                script {
+                    sh '''
+                    set -e
+                    mkdir -p ${GPG_DIR} ${TMP_DIR}
+                    gsutil cp ${GPG_KEY_PATH} ${TMP_DIR}/Fortress_UAT_PGP.key
+                    gpg --homedir ${GPG_DIR} --import ${TMP_DIR}/Fortress_UAT_PGP.key
+                    rm ${TMP_DIR}/Fortress_UAT_PGP.key
+                    '''
+                }
+            }
+        }
+
+        stage('Download, Encrypt, and Upload Files') {
+            steps {
+                script {
+                    // Parse the key-value pair in Groovy
+                    def keyValue = readJSON text: params.KEY_VALUE_PAIR
+
+                    sh '''
+                    set -e
+                    if [ ! -d "${TMP_DIR}" ]; then
+                        mkdir -p ${TMP_DIR}
+                    fi
+
+                    # List files and download them
+                    gsutil ls ${SOURCE_GCS_BUCKET}/* | tail -n +2 > ${TMP_DIR}/file_list.txt
+                    cat ${TMP_DIR}/file_list.txt
+
+                    while read -r file; do
+                        filename=$(basename "$file")
+
+                        echo "Downloading $file..."
+                        gsutil cp "$file" ${TMP_DIR}/
+
+                        # Extract text between the second and third underscore
+                        extracted_text=$(echo "$filename" | awk -F'_' '{print $3}')
+
+                        # Use Groovy to get the value from the map
+                        value=''' + keyValue["${extracted_text}"] + '''
+
+                        if [ -z "${value}" ]; then
+                            echo "Error: No value found for key ${extracted_text}"
+                            exit 1
+                        fi
+
+                        encrypted_file="${value}_${filename}.pgp"
+
+                        # Encrypt the file
+                        echo "Encrypting ${TMP_DIR}/${filename}..."
+                        gpg --homedir ${GPG_DIR} --trust-model always --output "${TMP_DIR}/${encrypted_file}" --encrypt --openpgp --recipient ${GPG_CRED} "${TMP_DIR}/${filename}"
+
+                        # Upload the encrypted file
+                        echo "Uploading ${TMP_DIR}/${encrypted_file} to ${DESTINATION_GCS_BUCKET}..."
+                        gsutil cp "${TMP_DIR}/${encrypted_file}" ${DESTINATION_GCS_BUCKET}/
+
+                        # Clean up files after processing
+                        rm "${TMP_DIR}/${filename}" "${TMP_DIR}/${encrypted_file}"
+                    done < ${TMP_DIR}/file_list.txt
+
+                    # Clean up the temporary directory
+                    rm -rf ${TMP_DIR}
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Pipeline execution completed successfully.'
+        }
+        failure {
+            echo 'Pipeline execution failed.'
+        }
+    }
+}
