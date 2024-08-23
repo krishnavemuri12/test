@@ -1,0 +1,103 @@
+pipeline {
+    agent {
+        label "nscpm-gfs-canada-it-df-uat-sa"
+    }
+
+    parameters {
+        string(name: 'SOURCE_GCS_BUCKET', defaultValue: 'gs://gfs-canada-it-billing-uat/pbim-report/PBIMReport/2024-6', description: 'Source GCS bucket path')
+        string(name: 'DESTINATION_GCS_BUCKET', defaultValue: 'gs://can-secure-key-uat/test', description: 'Destination GCS bucket path')
+        text(name: 'KEY_VALUE_PAIR', defaultValue: '{"PBIMCIVILFORFEITURE": "COMMERCE82053", "PBIMMINSMALLBREVRMBV": "COMMERCE65053"}', description: 'Key-value pair in JSON format')
+    }
+
+    environment {
+        GPG_DIR = "${WORKSPACE}/.gnupg" // Define the GPG home directory within the workspace
+        GPG_CRED = credentials('gpg-recipient-pbim-uat') // Jenkins credential ID for the GPG recipient
+        TMP_DIR = "${WORKSPACE}/tmp" // Temporary directory for processing files
+        GPG_KEY_PATH = "gs://gfs-canada-it-billing-uat/pbim-report/keys/Fortress_UAT_PGP.key" // Path to the GPG key file in GCS
+    }
+
+    stages {
+        stage('Setup and Import GPG Key') {
+            steps {
+                script {
+                    // Download and import the GPG key file from the GCS bucket
+                    sh '''
+                    mkdir -p ${GPG_DIR} ${TMP_DIR}
+                    gsutil cp ${GPG_KEY_PATH} ${TMP_DIR}/ # Download the GPG key file from GCS
+                    gpg --homedir ${GPG_DIR} --import ${TMP_DIR}/Fortress_UAT_PGP.key # Import the GPG key
+                    ls -l ${TMP_DIR}/
+                    rm ${TMP_DIR}/Fortress_UAT_PGP.key   # Remove the key file after import
+                    '''
+                }
+            }
+        }
+
+        stage('Download, Encrypt and Upload Files') {
+            steps {
+                script {
+                    // Parse the key-value pair
+                    def keyValue = readJSON text: params.KEY_VALUE_PAIR
+
+                    // Convert the keyValue map to a JSON string
+                    def keyValueJson = groovy.json.JsonOutput.toJson(keyValue)
+
+                    // Download, encrypt, and upload files sequentially
+                    sh """
+                    if [ ! -d "${TMP_DIR}" ]; then
+                        mkdir -p ${TMP_DIR}
+                    fi
+                    # Create a list of files from the source GCS bucket
+                    gsutil ls ${SOURCE_GCS_BUCKET}/* | tail -n +2 > ${TMP_DIR}/file_list.txt
+                    cat ${TMP_DIR}/file_list.txt
+
+                    # Download and process each file
+                    while read -r file; do
+                        # Extract the filename from the path
+                        filename=\$(basename "\$file")
+
+                        echo "Downloading \$file..."
+                        gsutil cp "\$file" ${TMP_DIR}/
+
+                        # Extract the text between the second and third underscore
+                        extracted_text=\$(echo "\$filename" | awk -F'_' '{print \$3}')
+
+                        # Get the value corresponding to the extracted text
+                        value=\$(echo '${keyValueJson}' | jq -r --arg key "\$extracted_text" '.[$key]' 2>/dev/null)
+                        # Display the value in the console output
+                        echo "Value: \$value"
+
+                        # Create the encrypted output file name
+                        encrypted_file="\${value}_\${filename}.pgp"
+
+                        # Encrypt the file
+                        echo "Encrypting ${TMP_DIR}/\${filename}..."
+                        gpg --homedir ${GPG_DIR} --trust-model always --output "${TMP_DIR}/\${filename}.pgp" --encrypt --openpgp --recipient ${GPG_CRED} "${TMP_DIR}/\${filename}"
+
+                        # Upload the encrypted file
+                        echo "Uploading ${TMP_DIR}/\${filename}.pgp to ${DESTINATION_GCS_BUCKET}..."
+                        gsutil cp "${TMP_DIR}/\${filename}.pgp" ${DESTINATION_GCS_BUCKET}/
+
+                        # Clean up files after processing
+                        rm "${TMP_DIR}/\${filename}" "${TMP_DIR}/\${filename}.pgp"
+                        
+                        echo "-------------------------------------------------------"
+                        echo "-------------------------------------------------------"
+                    done < ${TMP_DIR}/file_list.txt
+
+                    # Clean up the temporary directory
+                    rm -rf ${TMP_DIR}
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Pipeline execution completed successfully.'
+        }
+        failure {
+            echo 'Pipeline execution failed'
+        }
+    }
+}
