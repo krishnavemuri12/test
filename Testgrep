@@ -1,0 +1,10 @@
+patterns="api-datacln.prd.dfkl.ca nane1.gcp.efx
+api-datacln.prd.dfkl.ca nane2.gcp.efx
+api-cm.prd.dfkl.ca nane1.gcp.efx
+api-cm.prd.dfkl.ca nane2.gcp.efx"
+
+gsutil ls gs://northamerica-northeast1-ca-gbp-commercial-prd/internal/commercial/*/*/*.yml | while read -r file; do
+  if gsutil cat "$file" | grep -q -e "$patterns"; then
+    echo "$file"
+  fi
+done
