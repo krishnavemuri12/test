@@ -1,0 +1,53 @@
+pipeline {
+    agent none
+    
+    parameters {
+        choice(choices: ['Project1', 'Project2', 'Project3'], description: 'Select GCP Project', name: 'GCP_PROJECT')
+    }
+    
+    stages {
+        stage('Select Node') {
+            when {
+                expression {
+                    return params.GCP_PROJECT != null
+                }
+            }
+            steps {
+                script {
+                    def node_label
+                    if (params.GCP_PROJECT == 'Project1') {
+                        node_label = 'gcp-node-project1'
+                    } else if (params.GCP_PROJECT == 'Project2') {
+                        node_label = 'gcp-node-project2'
+                    } else if (params.GCP_PROJECT == 'Project3') {
+                        node_label = 'gcp-node-project3'
+                    }
+                    
+                    echo "Selected node label: ${node_label}"
+                    
+                    // Reassign the pipeline to run on the selected node
+                    agent { label node_label }
+                }
+            }
+        }
+
+        stage('Describe VMs') {
+            agent { label node_label }
+            steps {
+                script {
+                    echo "Fetching VM details for project: ${params.GCP_PROJECT}"
+
+                    // Command to list VM instances with structured output
+                    def listVmsCommand = """
+                    gcloud compute instances list \
+                    --project=${params.GCP_PROJECT} \
+                    --format='table[box,title="VM Details"](name, creationTimestamp.date(tz=UTC), labels.list(), serviceAccounts.email, networkInterfaces.network, status)'
+                    """
+
+                    // Execute the command
+                    sh listVmsCommand
+                }
+            }
+        }
+    }
+}
