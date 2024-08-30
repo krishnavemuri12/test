@@ -1,10 +1,10 @@
 pipeline {
     agent none
-    
+
     parameters {
         choice(choices: ['Project1', 'Project2', 'Project3'], description: 'Select GCP Project', name: 'GCP_PROJECT')
     }
-    
+
     stages {
         stage('Select Node') {
             when {
@@ -22,9 +22,9 @@ pipeline {
                     } else if (params.GCP_PROJECT == 'Project3') {
                         node_label = 'gcp-node-project3'
                     }
-                    
+
                     echo "Selected node label: ${node_label}"
-                    
+
                     // Reassign the pipeline to run on the selected node
                     agent { label node_label }
                 }
@@ -37,15 +37,30 @@ pipeline {
                 script {
                     echo "Fetching VM details for project: ${params.GCP_PROJECT}"
 
-                    // Command to list VM instances with structured output
+                    // Command to list VM instances in JSON format for processing
                     def listVmsCommand = """
                     gcloud compute instances list \
                     --project=${params.GCP_PROJECT} \
-                    --format='table[box,title="VM Details"](name, creationTimestamp.date(tz=UTC), labels.list(), serviceAccounts.email, networkInterfaces.network, status)'
+                    --format=json
                     """
 
-                    // Execute the command
-                    sh listVmsCommand
+                    def vmDetails = sh(script: listVmsCommand, returnStdout: true).trim()
+
+                    // Parse the JSON output and format each VM's details
+                    def vms = readJSON text: vmDetails
+
+                    vms.each { vm ->
+                        echo """
+                        ------------------------------------
+                        VM Name: ${vm.name}
+                        Creation Date: ${vm.creationTimestamp}
+                        Labels: ${vm.labels ?: 'None'}
+                        Service Account: ${vm.serviceAccounts[0]?.email ?: 'None'}
+                        Network: ${vm.networkInterfaces[0]?.network ?: 'None'}
+                        Status: ${vm.status}
+                        ------------------------------------
+                        """
+                    }
                 }
             }
         }
