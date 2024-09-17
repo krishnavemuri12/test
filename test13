@@ -1,0 +1,62 @@
+pipeline {
+    agent {
+        label 'your-agent-label' // Specify the label of the agent that has access to GCS
+    }
+    parameters {
+        string(name: 'GCS_FILE_PATH', defaultValue: 'gs://path/to/your/bucket/profile.yml', description: 'Full GCS bucket path including the YAML file name')
+        choice(name: 'PCI_FLOW', choices: ['true', 'false'], description: 'New value for pciFlow')
+        choice(name: 'CP_OR_RNM', choices: ['copy', 'rename'], description: 'New value for cpOrRnm')
+        string(name: 'OUTPUT_FILE_NAME', defaultValue: 'abcd', description: 'New value for outputFileName')
+        string(name: 'FROM_PATH', defaultValue: 'efgh', description: 'New value for fromPath')
+        string(name: 'SECOND_APP_ID', defaultValue: 'GBPCAN1', description: 'New value for the appId in sensor.appIds')
+    }
+    environment {
+        YAML_FILE = 'profile.yml' // Local name of the YAML file
+    }
+    stages {
+        stage('Download and Update YAML Using sed') {
+            steps {
+                script {
+                    // Download the YAML file from GCS and update it using sed
+                    sh """
+                        # Download YAML from GCS
+                        echo "Downloading YAML from GCS..."
+                        gsutil cp ${params.GCS_FILE_PATH} $YAML_FILE
+
+                        # Update the YAML file using sed commands
+
+                        # Update pciFlow
+                        sed -i 's/pciFlow: .*/pciFlow: ${params.PCI_FLOW}/' $YAML_FILE
+                        
+                        # Update cpOrRnm
+                        sed -i 's/cpOrRnm: .*/cpOrRnm: ${params.CP_OR_RNM}/' $YAML_FILE
+                        
+                        # Update outputFileName
+                        sed -i 's/outputFileName: .*/outputFileName: ${params.OUTPUT_FILE_NAME}/' $YAML_FILE
+                        
+                        # Update fromPath
+                        sed -i 's/fromPath: .*/fromPath: ${params.FROM_PATH}/' $YAML_FILE
+                        
+                        # Update single appId in sensor.appIds
+                        sed -i '/appIds:/!b;n;s/.*/  - ${params.SECOND_APP_ID}/' $YAML_FILE
+
+                        # Display the updated YAML file
+                        echo "Displaying updated YAML file..."
+                        cat $YAML_FILE
+                    """
+                }
+            }
+        }
+        stage('Upload Updated YAML to GCS') {
+            steps {
+                script {
+                    // Upload the updated YAML file back to the provided GCS path
+                    sh """
+                        echo "Uploading updated YAML back to GCS..."
+                        gsutil cp $YAML_FILE ${params.GCS_FILE_PATH}
+                    """
+                }
+            }
+        }
+    }
+}
