@@ -1,0 +1,87 @@
+pipeline {
+    agent any
+    parameters {
+        string(name: 'GCS_BUCKET_PATH', defaultValue: '', description: 'Path to the GCS bucket')
+        string(name: 'PCI_FLOW', defaultValue: '', description: 'New value for pciFlow')
+        string(name: 'CP_OR_RNM', defaultValue: '', description: 'New value for cpOrRnm')
+        string(name: 'OUTPUT_FILE_NAME', defaultValue: '', description: 'New value for outputFileName')
+        string(name: 'FROM_PATH', defaultValue: '', description: 'New value for fromPath')
+        string(name: 'SECOND_APP_ID', defaultValue: '', description: 'New second value for appIds')
+    }
+    stages {
+        stage('Download YAML File') {
+            steps {
+                sh 'gsutil cp ${GCS_BUCKET_PATH} ./config.yml'
+            }
+        }
+        stage('Update YAML File') {
+            steps {
+                script {
+                    def yamlFile = readYaml file: 'config.yml'
+                    yamlFile.dynamicVariables[0].configuration.pciFlow = params.PCI_FLOW
+                    yamlFile.dynamicVariables[0].configuration.cpOrRnm = params.CP_OR_RNM
+                    yamlFile.dynamicVariables[0].configuration.outputFileName = params.OUTPUT_FILE_NAME
+                    yamlFile.dynamicVariables[0].configuration.fromPath = params.FROM_PATH
+                    if (yamlFile.sensor.appIds.size() > 1) {
+                        yamlFile.sensor.appIds[1] = params.SECOND_APP_ID
+                    }
+                    writeYaml file: 'config.yml', data: yamlFile
+                }
+            }
+        }
+        stage('Display Updated YAML File') {
+            steps {
+                sh 'cat config.yml'
+            }
+        }
+        stage('Upload Updated YAML File') {
+            steps {
+                sh 'gsutil cp ./config.yml ${GCS_BUCKET_PATH}'
+            }
+        }
+    }
+}
+____
+
+
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'gcsBucketPath', defaultValue: '', description: 'GCS bucket path')
+        string(name: 'yamlFileName', defaultValue: '', description: 'YAML file name')
+        string(name: 'pciFlow', defaultValue: '', description: 'PCI flow value')
+        string(name: 'cpOrRnm', defaultValue: '', description: 'CP or RNM value')
+        string(name: 'outputFileName', defaultValue: '', description: 'Output file name value')
+        string(name: 'fromPath', defaultValue: '', description: 'From path value')
+    }
+
+    stages {
+        stage('Download YAML File') {
+            steps {
+                sh "gsutil cp ${gcsBucketPath}/${yamlFileName} ./${yamlFileName}"
+            }
+        }
+
+        stage('Update YAML File') {
+            steps {
+                sh "sed -i 's/pciFlow: .*/pciFlow: ${pciFlow}/' ${yamlFileName}"
+                sh "sed -i 's/cpOrRnm: .*/cpOrRnm: ${cpOrRnm}/' ${yamlFileName}"
+                sh "sed -i 's/outputFileName: .*/outputFileName: ${outputFileName}/' ${yamlFileName}"
+                sh "sed -i 's/fromPath: .*/fromPath: ${fromPath}/' ${yamlFileName}"
+            }
+        }
+
+        stage('View Updated YAML File') {
+            steps {
+                sh "cat ${yamlFileName}"
+            }
+        }
+
+        stage('Upload Updated YAML File') {
+            steps {
+                sh "gsutil cp ${yamlFileName} ${gcsBucketPath}/${yamlFileName}"
+            }
+        }
+    }
+}
