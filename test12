@@ -1,0 +1,58 @@
+pipeline {
+    agent any
+    parameters {
+        string(name: 'GCS_BUCKET_PATH', defaultValue: '', description: 'Path to the GCS bucket')
+        choice(name: 'PCI_FLOW', choices: ['true', 'false'], description: 'New value for pciFlow')
+        choice(name: 'CP_OR_RNM', choices: ['copy', 'rename'], description: 'New value for cpOrRnm')
+        string(name: 'OUTPUT_FILE_NAME', defaultValue: '', description: 'New value for outputFileName')
+        string(name: 'FROM_PATH', defaultValue: '', description: 'New value for fromPath')
+        string(name: 'SECOND_APP_ID', defaultValue: '', description: 'New second value for appIds')
+    }
+    stages {
+        stage('Download YAML File') {
+            steps {
+                script {
+                    // Ensure the file does not already exist
+                    if (fileExists('config.yml')) {
+                        sh 'rm config.yml'
+                    }
+                    sh 'gsutil cp ${GCS_BUCKET_PATH} ./config.yml'
+                }
+            }
+        }
+        stage('Verify YAML File') {
+            steps {
+                script {
+                    if (!fileExists('config.yml')) {
+                        error 'YAML file not found after download'
+                    }
+                }
+            }
+        }
+        stage('Update YAML File') {
+            steps {
+                script {
+                    def yamlFile = readYaml file: 'config.yml'
+                    yamlFile.dynamicVariables[0].configuration.pciFlow = params.PCI_FLOW
+                    yamlFile.dynamicVariables[0].configuration.cpOrRnm = params.CP_OR_RNM
+                    yamlFile.dynamicVariables[0].configuration.outputFileName = params.OUTPUT_FILE_NAME
+                    yamlFile.dynamicVariables[0].configuration.fromPath = params.FROM_PATH
+                    if (yamlFile.sensor.appIds.size() > 1) {
+                        yamlFile.sensor.appIds[1] = params.SECOND_APP_ID
+                    }
+                    writeYaml file: 'config.yml', data: yamlFile
+                }
+            }
+        }
+        stage('Display Updated YAML File') {
+            steps {
+                sh 'cat config.yml'
+            }
+        }
+        stage('Upload Updated YAML File') {
+            steps {
+                sh 'gsutil cp ./config.yml ${GCS_BUCKET_PATH}'
+            }
+        }
+    }
+}
