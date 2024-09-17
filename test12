@@ -56,3 +56,53 @@ pipeline {
         }
     }
 }
+-----
+
+pipeline {
+    agent any
+    stages {
+        stage('Clean Workspace') {
+            steps {
+                deleteDir() // This will delete all files in the current workspace
+            }
+        }
+        stage('Download YAML from GCS') {
+            steps {
+                sh """
+                    gcloud auth activate-service-account --key-file=$GCS_KEY_FILE
+                    gsutil cp gs://${params.GCS_BUCKET_PATH}/profile.yml profile.yml
+                """
+            }
+        }
+        stage('Parse and Update YAML') {
+            steps {
+                script {
+                    def yaml = readYaml file: 'profile.yml' // Reading the YAML file
+
+                    // Update YAML values
+                    yaml.dynamicVariables[0].configuration.pciFlow = params.PCI_FLOW
+                    yaml.dynamicVariables[0].configuration.cpOrRnm = params.CP_OR_RNM
+                    yaml.dynamicVariables[0].configuration.outputFileName = params.OUTPUT_FILE_NAME
+                    yaml.dynamicVariables[0].configuration.fromPath = params.FROM_PATH
+                    yaml.sensor.appIds[1] = params.APP_ID
+                    
+                    // Write back to the YAML file
+                    writeYaml file: 'profile.yml', data: yaml
+                }
+            }
+        }
+        stage('Display Updated YAML') {
+            steps {
+                sh 'cat profile.yml'
+            }
+        }
+        stage('Upload YAML to GCS') {
+            steps {
+                sh """
+                    gcloud auth activate-service-account --key-file=$GCS_KEY_FILE
+                    gsutil cp profile.yml gs://${params.GCS_BUCKET_PATH}/profile.yml
+                """
+            }
+        }
+    }
+}
