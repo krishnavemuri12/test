@@ -106,3 +106,66 @@ pipeline {
         }
     }
 }
+____
+
+pipeline {
+    agent {
+        label 'your-agent-label' // Specify the label of the agent that has access to GCS
+    }
+    parameters {
+        string(name: 'GCS_BUCKET_PATH', defaultValue: 'path/to/your/bucket', description: 'GCS bucket path where the YAML file is located')
+        string(name: 'PCI_FLOW', defaultValue: 'true', description: 'New value for pciFlow')
+        string(name: 'CP_OR_RNM', defaultValue: 'rename', description: 'New value for cpOrRnm')
+        string(name: 'OUTPUT_FILE_NAME', defaultValue: 'abcd', description: 'New value for outputFileName')
+        string(name: 'FROM_PATH', defaultValue: 'efgh', description: 'New value for fromPath')
+        string(name: 'SECOND_APP_ID', defaultValue: 'GBPCAN1', description: 'New value for the second appId in sensor.appIds')
+    }
+    environment {
+        YAML_FILE = 'profile.yml'
+    }
+    stages {
+        stage('Download YAML from GCS') {
+            steps {
+                sh """
+                    echo "Downloading YAML from GCS..."
+                    gsutil cp gs://${params.GCS_BUCKET_PATH}/$YAML_FILE $YAML_FILE
+                """
+            }
+        }
+        stage('Update YAML') {
+            steps {
+                script {
+                    // Load YAML file
+                    def yaml = readYaml file: $YAML_FILE
+
+                    // Update YAML values
+                    yaml.dynamicVariables.find { it.type == 'CONSTANT' }.configuration.pciFlow = params.PCI_FLOW
+                    yaml.dynamicVariables.find { it.type == 'CONSTANT' }.configuration.cpOrRnm = params.CP_OR_RNM
+                    yaml.dynamicVariables.find { it.type == 'CONSTANT' }.configuration.outputFileName = params.OUTPUT_FILE_NAME
+                    yaml.dynamicVariables.find { it.type == 'CONSTANT' }.configuration.fromPath = params.FROM_PATH
+                    yaml.sensor.appIds[1] = params.SECOND_APP_ID
+
+                    // Save the modified YAML back into the same file
+                    writeYaml file: $YAML_FILE, data: yaml
+                }
+            }
+        }
+        stage('Display Updated YAML') {
+            steps {
+                sh """
+                    echo "Displaying updated YAML..."
+                    cat $YAML_FILE
+                """
+            }
+        }
+        stage('Upload Updated YAML to GCS') {
+            steps {
+                sh """
+                    echo "Uploading updated YAML back to GCS..."
+                    gsutil cp $YAML_FILE gs://${params.GCS_BUCKET_PATH}/$YAML_FILE
+                """
+            }
+        }
+    }
+}
+
