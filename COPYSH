@@ -1,0 +1,32 @@
+#!/bin/bash
+
+# GCS bucket base path
+GCS_BUCKET_PATH="gs://north/internal/commercial/profile/config"
+
+# Local base path where the .yml files are located
+LOCAL_BASE_PATH="north/internal/commercial/profile/config/.yml"
+
+# File containing the list of files to upload
+FILE_LIST="file_list.txt"
+
+# Check if the file list exists
+if [ ! -f "$FILE_LIST" ]; then
+    echo "File list not found!"
+    exit 1
+fi
+
+# Loop through each file in the file list
+while IFS= read -r local_file; do
+    # Get the filename from the path
+    filename=$(basename "$local_file")
+
+    # Form the full GCS path
+    gcs_path="$GCS_BUCKET_PATH/$filename"
+
+    # Copy the file to the GCS bucket
+    echo "Copying $local_file to $gcs_path"
+    gsutil cp "$local_file" "$gcs_path"
+
+done < "$FILE_LIST"
+
+echo "All files listed in $FILE_LIST have been copied to GCS!"
