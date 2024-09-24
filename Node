@@ -1,0 +1,40 @@
+pipeline {
+    agent none
+    parameters {
+        choice(
+            name: 'ENV',
+            choices: ['UAT', 'PROD'],
+            description: 'Select the environment for the Cloud Scheduler'
+        )
+    }
+    stages {
+        stage('Determine Node and Run Cloud Scheduler') {
+            steps {
+                script {
+                    String node_label = ""
+                    String cloud_scheduler_name = ""
+
+                    if (params.ENV == "UAT") {
+                        node_label = "uat-node" // Replace with actual UAT node label
+                        cloud_scheduler_name = "uat-cloud-scheduler-job" // Replace with actual UAT Cloud Scheduler name
+                    } else if (params.ENV == "PROD") {
+                        node_label = "prod-node" // Replace with actual PROD node label
+                        cloud_scheduler_name = "prod-cloud-scheduler-job" // Replace with actual PROD Cloud Scheduler name
+                    }
+
+                    // Run the pipeline on the appropriate node
+                    node(node_label) {
+                        echo "Running on node: ${node_label}"
+                        echo "Executing Cloud Scheduler: ${cloud_scheduler_name}"
+
+                        // Execute the Google Cloud Scheduler job
+                        // Replace the command below with the appropriate gcloud command for triggering the Cloud Scheduler
+                        sh """
+                        gcloud scheduler jobs run ${cloud_scheduler_name} --location=your-location
+                        """
+                    }
+                }
+            }
+        }
+    }
+}
