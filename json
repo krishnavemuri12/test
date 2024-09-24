@@ -1,0 +1,65 @@
+pipeline {
+    agent { label "${params.NODE_LABEL}" }
+
+    parameters {
+        string(name: 'SERVICE_ACCOUNT', defaultValue: 'first-scv@meg-kpv.iam.gserviceaccount.com', description: 'Google Cloud Service Account')
+        string(name: 'NODE_LABEL', defaultValue: 'gcp-agent', description: 'Node Label to run the pipeline')
+    }
+
+    stages {
+        stage('Extract Project and Service Account Name from Email') {
+            steps {
+                script {
+                    // Using shell to extract service account name and project ID from the service account email
+                    def serviceAccountEmail = "${params.SERVICE_ACCOUNT}"
+
+                    // Extract service account name (before @)
+                    def serviceAccountName = sh(script: "echo ${serviceAccountEmail} | cut -d'@' -f1", returnStdout: true).trim()
+
+                    // Extract project ID (after @ and before .iam)
+                    def projectName = sh(script: "echo ${serviceAccountEmail} | cut -d'@' -f2 | cut -d'.' -f1", returnStdout: true).trim()
+
+                    // Construct the secret name
+                    def secretName = "${projectName}-${serviceAccountName}"
+
+                    // Printing service account name and project name for debugging
+                    echo "Service Account Name: ${serviceAccountName}"
+                    echo "Project Name: ${projectName}"
+                    echo "Secret Name: ${secretName}"
+
+                    // Storing the secret name for later stages
+                    env.SECRET_NAME = secretName
+                }
+            }
+        }
+
+        stage('Retrieve JSON Key from Secret Manager') {
+            steps {
+                script {
+                    // Authenticate with GCP using gcloud SDK (Assumes gcloud SDK is installed and configured on the node)
+                    sh '''
+                        gcloud auth activate-service-account --key-file=/path/to/your/credentials.json
+                    '''
+
+                    // Fetch the secret from Google Cloud Secret Manager
+                    def secret = sh(script: "gcloud secrets versions access latest --secret=${env.SECRET_NAME} --format=json", returnStdout: true).trim()
+
+                    // Printing the secret for debugging
+                    echo "Secret Key: ${secret}"
+
+                    // Saving the JSON key for further use
+                    writeFile file: 'service-account-key.json', text: secret
+                }
+            }
+        }
+
+        stage('Use JSON Key') {
+            steps {
+                script {
+                    // You can use the JSON key in this stage, for example, to authenticate further GCP API requests
+                    echo "Using the JSON key saved at 'service-account-key.json'"
+                }
+            }
+        }
+    }
+}
