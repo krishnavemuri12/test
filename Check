@@ -1,0 +1,16 @@
+#!/bin/bash
+
+# Path to the text file containing the list of files (replace with actual path)
+file_list="file_list.txt"
+
+# Directory where the files should be located (replace with actual path)
+directory="/path/to/your/directory"
+
+# Loop through each file in the list
+while read -r file; do
+  if [ -e "$directory/$file" ]; then
+    echo "File '$file' exists."
+  else
+    echo "File '$file' is missing."
+  fi
+done < "$file_list"
