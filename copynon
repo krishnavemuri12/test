@@ -1,0 +1,79 @@
+#!/bin/bash
+
+# Source and destination buckets
+SOURCE_BUCKET="gs://your-bucket-name"
+DEST_BUCKET="gs://your-destination-bucket"
+
+# List all noncurrent files and copy them
+for object in $(gsutil ls -a $SOURCE_BUCKET | grep '#'); do
+  echo "Copying noncurrent object: $object"
+  gsutil cp $object $DEST_BUCKET
+done
+
+------========================================
+
+pipeline {
+    agent any
+    
+    environment {
+        SOURCE_BUCKET = "gs://your-source-bucket"
+        DEST_BUCKET = "gs://your-destination-bucket"
+    }
+
+    stages {
+        stage('List Noncurrent Versions') {
+            steps {
+                // List all files with noncurrent versions
+                script {
+                    echo "Listing noncurrent files from the GCS bucket..."
+                    sh """
+                    gsutil ls -a ${env.SOURCE_BUCKET} | grep '#' > noncurrent_files.txt
+                    cat noncurrent_files.txt
+                    """
+                }
+            }
+        }
+
+        stage('Copy and Rename Noncurrent Files') {
+            steps {
+                script {
+                    def noncurrentFiles = readFile('noncurrent_files.txt').split('\n')
+                    
+                    // Check if there are any noncurrent files to process
+                    if (noncurrentFiles.size() > 0) {
+                        echo "Processing noncurrent files..."
+                        
+                        noncurrentFiles.each { fileWithVersion ->
+                            if (fileWithVersion.trim()) {
+                                // Extract the base file name (before the version '#')
+                                def baseFileName = fileWithVersion.tokenize('#')[0].tokenize('/').last()
+                                def versionNumber = fileWithVersion.tokenize('#')[1]
+                                
+                                // Create a new file name based on the version
+                                def renamedFileName = "${baseFileName}-${versionNumber}"
+                                
+                                echo "Copying and renaming ${fileWithVersion} to ${renamedFileName}"
+                                
+                                // Copy the noncurrent file directly to the destination bucket with the new name
+                                sh """
+                                gsutil cp ${fileWithVersion} ${env.DEST_BUCKET}/${renamedFileName}
+                                """
+                            }
+                        }
+                    } else {
+                        echo "No noncurrent files found."
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            // Clean up after the job is done (removing the noncurrent file list)
+            script {
+                sh "rm -f noncurrent_files.txt"
+            }
+        }
+    }
+}
