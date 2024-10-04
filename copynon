@@ -77,3 +77,87 @@ pipeline {
         }
     }
 }
+_____
+
+
+
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'SOURCE_BUCKET', defaultValue: 'gs://your-source-bucket', description: 'Source GCS Bucket')
+        string(name: 'DEST_BUCKET', defaultValue: 'gs://your-destination-bucket', description: 'Destination GCS Bucket')
+    }
+
+    stages {
+        stage('Copy and Rename Noncurrent Files') {
+            steps {
+                script {
+                    sh '''
+                        # List all noncurrent files and copy them
+                        for object in $(gsutil ls -a ${SOURCE_BUCKET} | grep '#'); do
+                          # Extract the base file name and the generation number
+                          base_filename=$(echo $object | awk -F'#' '{print $1}' | awk -F'/' '{print $NF}')
+                          version_number=$(echo $object | awk -F'#' '{print $2}')
+                        
+                          # Create a new file name using the base name and version number
+                          renamed_filename="${base_filename}-${version_number}"
+                        
+                          echo "Copying and renaming noncurrent object: $object to $renamed_filename"
+                        
+                          # Copy the noncurrent file to the destination bucket with the new name
+                          gsutil cp $object "${DEST_BUCKET}/${renamed_filename}"
+                        done
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            echo "Finished processing noncurrent files"
+        }
+    }
+}
+
+
+-------
+
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'SOURCE_BUCKET', defaultValue: 'gs://your-source-bucket', description: 'Source GCS Bucket')
+        string(name: 'DEST_BUCKET', defaultValue: 'gs://your-destination-bucket', description: 'Destination GCS Bucket')
+    }
+
+    stages {
+        stage('Copy Noncurrent Files') {
+            steps {
+                script {
+                    sh '''
+                        # Source and destination buckets
+                        SOURCE_BUCKET="${SOURCE_BUCKET}"
+                        DEST_BUCKET="${DEST_BUCKET}"
+
+                        echo "Listing and copying noncurrent files from ${SOURCE_BUCKET} to ${DEST_BUCKET}"
+
+                        # List all noncurrent files and copy them
+                        for object in $(gsutil ls -a $SOURCE_BUCKET | grep '#'); do
+                          echo "Copying noncurrent object: $object"
+                          gsutil cp $object $DEST_BUCKET
+                        done
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            echo "Pipeline finished"
+        }
+    }
+}
+
