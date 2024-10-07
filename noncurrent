@@ -1,0 +1,48 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'SOURCE_BUCKET', description: 'Source GCS bucket path')
+        string(name: 'DESTINATION_BUCKET', description: 'Destination GCS bucket path')
+    }
+
+    stages {
+        stage('List and Process Non-Current Versions') {
+            steps {
+                script {
+                    // List non-current versions
+                    def noncurrentVersions = sh(
+                        script: """
+                            gsutil ls -a -l ${params.SOURCE_BUCKET} | grep -v 'CURRENT' | awk '{print \$3" "\$4" "\$8}'
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    // Process each non-current version
+                    noncurrentVersions.split('\n').each { line ->
+                        def (date, time, file) = line.split()
+                        def deletedDate = date.replace('-', '')
+                        def fileName = file.tokenize('/').last()
+                        def newFileName = "${fileName}_${deletedDate}"
+                        
+                        // Copy and rename the file
+                        sh """
+                            gsutil cp ${file} ${params.DESTINATION_BUCKET}/${newFileName}
+                        """
+                        
+                        echo "Processed: ${file} -> ${params.DESTINATION_BUCKET}/${newFileName}"
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Successfully processed non-current versions from ${params.SOURCE_BUCKET} to ${params.DESTINATION_BUCKET}"
+        }
+        failure {
+            echo "Failed to process non-current versions"
+        }
+    }
+}
