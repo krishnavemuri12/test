@@ -1,0 +1,50 @@
+pipeline {
+    agent any
+    environment {
+        PROJECT_ID = 'your-gcp-project-id'
+        REGION = 'your-region'
+        JOB_NAME = 'your-dataflow-job-name'
+        TEMPLATE_PATH = 'gs://your-template-path' // specify your Dataflow template path
+        PARAMETERS = 'param1=value1,param2=value2' // specify your parameters here
+    }
+    
+    stages {
+        stage('Trigger Dataflow Job') {
+            steps {
+                script {
+                    try {
+                        // Trigger Dataflow job using gcloud command
+                        sh """
+                        gcloud dataflow jobs run ${JOB_NAME} \
+                            --project=${PROJECT_ID} \
+                            --region=${REGION} \
+                            --gcs-location=${TEMPLATE_PATH} \
+                            --parameters=${PARAMETERS}
+                        """
+                    } catch (Exception e) {
+                        // If the Dataflow job fails, mark the build as failed
+                        currentBuild.result = 'FAILURE'
+                        error("Dataflow job failed: ${e.message}")
+                    }
+                }
+            }
+        }
+    }
+    
+    post {
+        failure {
+            // Send notification on failure
+            echo "Job failed! Sending notification..."
+            // Use your preferred notification method here:
+            // Example: Send an email
+            emailext(
+                subject: "Jenkins Pipeline Failed: ${env.JOB_NAME}",
+                body: "The Jenkins pipeline job '${env.JOB_NAME}' has failed. Please check the logs for details.",
+                to: 'your-email@example.com'
+            )
+        }
+        success {
+            echo "Dataflow job completed successfully!"
+        }
+    }
+}
