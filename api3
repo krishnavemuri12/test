@@ -1,0 +1,236 @@
+pipeline {
+    agent any
+
+    parameters {
+        choice(name: 'PROMOTION_OPTION', choices: ['1. NPE->UAT->PROD', '2. NPE->UAT', '3. UAT->PROD'], description: 'Select the promotion option')
+        booleanParam(name: 'REPUBLISH', defaultValue: false, description: 'Republish before promoting')
+        booleanParam(name: 'KEEP_LOWER_ENV', defaultValue: false, description: 'Keep published in lower environment after promoting')
+        string(name: 'DAG_PREFIX', defaultValue: 'CAGBPOFLN_', description: 'DAG Prefix')
+        choice(name: 'RETRIES', choices: ['0', '1', '2'], description: 'Number of retries')
+        text(name: 'PIPELINE_LIST', description: 'List of pipelines to promote (one per line)')
+    }
+
+    environment {
+        NPE_CREDENTIALS = credentials('npe-credentials')
+        UAT_CREDENTIALS = credentials('uat-credentials')
+        PROD_CREDENTIALS = credentials('prod-credentials')
+    }
+
+    stages {
+        stage('Generate OAuth Tokens') {
+            steps {
+                script {
+                    env.NPE_TOKEN = getOAuthToken(env.NPE_CREDENTIALS_USR, env.NPE_CREDENTIALS_PSW, 'NPE')
+                    env.UAT_TOKEN = getOAuthToken(env.UAT_CREDENTIALS_USR, env.UAT_CREDENTIALS_PSW, 'UAT')
+                    env.PROD_TOKEN = getOAuthToken(env.PROD_CREDENTIALS_USR, env.PROD_CREDENTIALS_PSW, 'PROD')
+                }
+            }
+        }
+
+        stage('Process Pipelines') {
+            steps {
+                script {
+                    def pipelineList = params.PIPELINE_LIST.split('\n')
+                    for (int retry = 0; retry <= params.RETRIES.toInteger(); retry++) {
+                        try {
+                            processPipelines(pipelineList)
+                            break
+                        } catch (Exception e) {
+                            if (retry == params.RETRIES.toInteger()) {
+                                error("Failed after ${params.RETRIES} retries: ${e.message}")
+                            } else {
+                                echo "Retry ${retry + 1} due to error: ${e.message}"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            sendSummaryReport()
+        }
+    }
+}
+
+def getOAuthToken(clientId, clientSecret, env) {
+    def oauthUrl = "https://fedsso/as/token.oauth2"
+    def requestBody = "client_id=${clientId}&client_secret=${clientSecret}&grant_type=client_credentials"
+    def response = sh(script: "curl -s -X POST -H 'Content-Type: application/x-www-form-urlencoded' -d '${requestBody}' ${oauthUrl}", returnStdout: true).trim()
+    def token = readJSON(text: response).access_token
+    if (!token) {
+        error("Failed to obtain OAuth token for ${env}")
+    }
+    return token
+}
+
+def processPipelines(pipelineList) {
+    def promotions = [:]
+    for (pipeline in pipelineList) {
+        def (customer, name) = pipeline.split('/')
+        def dagFolder = "${params.DAG_PREFIX}${name.toUpperCase().replace('-', '_')}"
+        promotions[pipeline] = { ->
+            promoteBasedOnOption(customer, name, dagFolder)
+        }
+    }
+    parallel promotions
+}
+
+def promoteBasedOnOption(customer, name, dagFolder) {
+    switch(params.PROMOTION_OPTION) {
+        case '1. NPE->UAT->PROD':
+            option1(customer, name, dagFolder)
+            break
+        case '2. NPE->UAT':
+            option2(customer, name, dagFolder)
+            break
+        case '3. UAT->PROD':
+            option3(customer, name, dagFolder)
+            break
+    }
+}
+
+def option1(customer, name, dagFolder) {
+    if (params.REPUBLISH) {
+        unpublishAndPublish('NPE', customer, name, dagFolder)
+    }
+    unpublishAndPromote('NPE', 'UAT', customer, name, dagFolder)
+    publish('UAT', customer, name, dagFolder)
+    unpublishAndPromote('UAT', 'PROD', customer, name, dagFolder)
+    publish('PROD', customer, name, dagFolder)
+    if (!params.KEEP_LOWER_ENV) {
+        unpublish('NPE', customer, name, dagFolder)
+        unpublish('UAT', customer, name, dagFolder)
+    }
+}
+
+def option2(customer, name, dagFolder) {
+    if (params.REPUBLISH) {
+        unpublishAndPublish('NPE', customer, name, dagFolder)
+    }
+    unpublishAndPromote('NPE', 'UAT', customer, name, dagFolder)
+    publish('UAT', customer, name, dagFolder)
+    if (!params.KEEP_LOWER_ENV) {
+        unpublish('NPE', customer, name, dagFolder)
+    }
+}
+
+def option3(customer, name, dagFolder) {
+    if (params.REPUBLISH) {
+        unpublishAndPublish('UAT', customer, name, dagFolder)
+    }
+    unpublishAndPromote('UAT', 'PROD', customer, name, dagFolder)
+    publish('PROD', customer, name, dagFolder)
+    if (!params.KEEP_LOWER_ENV) {
+        unpublish('UAT', customer, name, dagFolder)
+    }
+}
+
+def unpublishAndPublish(env, customer, name, dagFolder) {
+    unpublish(env, customer, name, dagFolder)
+    publish(env, customer, name, dagFolder)
+}
+
+def unpublishAndPromote(fromEnv, toEnv, customer, name, dagFolder) {
+    unpublish(toEnv, customer, name, dagFolder)
+    promote(fromEnv, toEnv, customer, name, dagFolder)
+}
+
+def unpublish(env, customer, name, dagFolder) {
+    def token = env == 'NPE' ? env.NPE_TOKEN : (env == 'UAT' ? env.UAT_TOKEN : env.PROD_TOKEN)
+    def apiUrl = getUnpublishUrl(env)
+    def requestBody = [
+        customer: customer,
+        name: name,
+        bu: 'ca',
+        parentDAGFolder: dagFolder
+    ]
+    def response = sh(script: """
+        curl -s -X POST -H 'Content-Type: application/json' -H 'Authorization: Bearer ${token}' -d '${groovy.json.JsonOutput.toJson(requestBody)}' ${apiUrl}
+    """, returnStdout: true).trim()
+    echo "Unpublish response for ${env}: ${response}"
+}
+
+def publish(env, customer, name, dagFolder) {
+    def token = env == 'NPE' ? env.NPE_TOKEN : (env == 'UAT' ? env.UAT_TOKEN : env.PROD_TOKEN)
+    def apiUrl = getPublishUrl(env)
+    def requestBody = [
+        customer: customer,
+        name: name,
+        bu: 'ca',
+        parentDAGFolder: dagFolder
+    ]
+    def response = sh(script: """
+        curl -s -X POST -H 'Content-Type: application/json' -H 'Authorization: Bearer ${token}' -d '${groovy.json.JsonOutput.toJson(requestBody)}' ${apiUrl}
+    """, returnStdout: true).trim()
+    echo "Publish response for ${env}: ${response}"
+    if (response.contains("error") || response.contains("failure")) {
+        error("Failed to publish in ${env}")
+    }
+}
+
+def promote(fromEnv, toEnv, customer, name, dagFolder) {
+    def token = fromEnv == 'NPE' ? env.NPE_TOKEN : env.UAT_TOKEN
+    def apiUrl = getPromoteUrl(fromEnv)
+    def bucket = toEnv == 'UAT' ? 'northamerica-northeast1-ca-gbp-consumer-uat' : 'abcd'
+    def requestBody = [
+        customer: customer,
+        name: name,
+        bu: 'ca',
+        parentDAGFolder: dagFolder,
+        bucket: bucket
+    ]
+    def response = sh(script: """
+        curl -s -X POST -H 'Content-Type: application/json' -H 'Authorization: Bearer ${token}' -d '${groovy.json.JsonOutput.toJson(requestBody)}' ${apiUrl}
+    """, returnStdout: true).trim()
+    echo "Promote response from ${fromEnv} to ${toEnv}: ${response}"
+    if (response.contains("error") || response.contains("failure")) {
+        error("Failed to promote from ${fromEnv} to ${toEnv}")
+    }
+    sleep(time: 5, unit: 'MINUTES')
+}
+
+def getUnpublishUrl(env) {
+    switch(env) {
+        case 'NPE':
+            return 'https://ram-ntr-app.alpha.pk/config/unpublish'
+        case 'UAT':
+            return 'https://ram-ntr-app.uat.pk/config/unpublish'
+        case 'PROD':
+            return 'https://ram-ntr-app.prd.pk/config/unpublish'
+        default:
+            error("Invalid environment for unpublish: ${env}")
+    }
+}
+
+def getPublishUrl(env) {
+    switch(env) {
+        case 'NPE':
+            return 'https://ram-ntr-app.alpha.pk/config/publish'
+        case 'UAT':
+            return 'https://ram-ntr-app.uat.pk/config/publish'
+        case 'PROD':
+            return 'https://ram-ntr-app.prd.pk/config/publish'
+        default:
+            error("Invalid environment for publish: ${env}")
+    }
+}
+
+def getPromoteUrl(fromEnv) {
+    switch(fromEnv) {
+        case 'NPE':
+            return 'https://ram-ntr-app.alpha.pk/config/promote'
+        case 'UAT':
+            return 'https://ram-ntr-app.uat.pk/config/promote'
+        default:
+            error("Invalid environment for promote: ${fromEnv}")
+    }
+}
+
+def sendSummaryReport() {
+    // Implement summary report generation and email sending
+    echo "Sending summary report..."
+    // Add your implementation here
+}
