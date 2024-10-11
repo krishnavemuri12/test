@@ -22,7 +22,7 @@ pipeline {
                 script {
                     // Generate OAuth token for NPE
                     withCredentials([usernamePassword(credentialsId: 'NPE_CREDENTIALS', passwordVariable: 'NPE_CLIENT_SECRET', usernameVariable: 'NPE_CLIENT_ID')]) {
-                        def npeOauthUrl = "https://npe-auth.example.com/oauth2/token"
+                        def npeOauthUrl = "https://ram-ntr-app.alpha.pk/oauth2/token" // Replace with actual NPE OAuth endpoint
                         def npeRequestBody = "client_id=${env.NPE_CLIENT_ID}&client_secret=${env.NPE_CLIENT_SECRET}&grant_type=client_credentials"
                         def npeResponse = sh(script: """
                             curl -s -X POST -H 'Content-Type: application/x-www-form-urlencoded' -d '${npeRequestBody}' ${npeOauthUrl} | jq -r '.access_token'
@@ -38,7 +38,7 @@ pipeline {
 
                     // Generate OAuth token for UAT/PROD
                     withCredentials([usernamePassword(credentialsId: 'UAT_PROD_CREDENTIALS', passwordVariable: 'UAT_PROD_CLIENT_SECRET', usernameVariable: 'UAT_PROD_CLIENT_ID')]) {
-                        def uatProdOauthUrl = "https://uat-prod-auth.example.com/oauth2/token"
+                        def uatProdOauthUrl = "https://ram-ntr-app.uat.pk/oauth2/token" // Replace with actual UAT/PROD OAuth endpoint
                         def uatProdRequestBody = "client_id=${env.UAT_PROD_CLIENT_ID}&client_secret=${env.UAT_PROD_CLIENT_SECRET}&grant_type=client_credentials"
                         def uatProdResponse = sh(script: """
                             curl -s -X POST -H 'Content-Type: application/x-www-form-urlencoded' -d '${uatProdRequestBody}' ${uatProdOauthUrl} | jq -r '.access_token'
@@ -80,14 +80,18 @@ pipeline {
                     }
 
                     // Define functions for actions with hardcoded endpoints
-                    def unpublish = { envName, customer, name, bu, parentDAGFolder, token ->
+                    def unpublish = { envName, customer, name, bu, parentDAGFolder ->
                         def url = ''
+                        def token = ''
                         if (envName == 'NPE') {
                             url = 'https://ram-ntr-app.alpha.pk/config/unpublish'
+                            token = env.NPE_TOKEN
                         } else if (envName == 'UAT') {
                             url = 'https://ram-ntr-app.uat.pk/config/unpublish'
+                            token = env.UAT_PROD_TOKEN
                         } else if (envName == 'PROD') {
                             url = 'https://ram-ntr-app.prd.pk/config/unpublish'
+                            token = env.UAT_PROD_TOKEN
                         }
 
                         def payload = groovy.json.JsonOutput.toJson([
@@ -100,14 +104,18 @@ pipeline {
                         echo "Unpublish request sent to ${envName} for ${name}"
                     }
 
-                    def publish = { envName, customer, name, bu, parentDAGFolder, token ->
+                    def publish = { envName, customer, name, bu, parentDAGFolder ->
                         def url = ''
+                        def token = ''
                         if (envName == 'NPE') {
                             url = 'https://ram-ntr-app.alpha.pk/config/publish'
+                            token = env.NPE_TOKEN
                         } else if (envName == 'UAT') {
                             url = 'https://ram-ntr-app.uat.pk/config/publish'
+                            token = env.UAT_PROD_TOKEN
                         } else if (envName == 'PROD') {
                             url = 'https://ram-ntr-app.prd.pk/config/publish'
+                            token = env.UAT_PROD_TOKEN
                         }
 
                         def payload = groovy.json.JsonOutput.toJson([
@@ -120,12 +128,15 @@ pipeline {
                         echo "Publish request sent to ${envName} for ${name}"
                     }
 
-                    def promote = { fromEnv, toEnv, customer, name, bu, parentDAGFolder, bucket, token ->
+                    def promote = { fromEnv, toEnv, customer, name, bu, parentDAGFolder, bucket ->
                         def url = ''
+                        def token = ''
                         if (fromEnv == 'NPE' && toEnv == 'UAT') {
                             url = 'https://ram-ntr-app.alpha.pk/config/promote'
+                            token = env.NPE_TOKEN
                         } else if (fromEnv == 'UAT' && toEnv == 'PROD') {
                             url = 'https://ram-ntr-app.uat.pk/config/promote'
+                            token = env.UAT_PROD_TOKEN
                         }
 
                         def payload = groovy.json.JsonOutput.toJson([
@@ -150,8 +161,6 @@ pipeline {
                         def (customer, name) = pipeline.trim().split('/')
                         def parentDAGFolder = params.DAG_PREFIX + name.toUpperCase().replace('-', '_')
                         def bu = 'ca'
-                        def tokenLowerEnv = env.NPE_TOKEN
-                        def tokenHigherEnv = env.UAT_PROD_TOKEN
                         def promoteFromEnv
                         def promoteToEnv
                         def bucket
@@ -161,22 +170,20 @@ pipeline {
                                 promoteFromEnv = 'NPE'
                                 promoteToEnv = 'UAT'
                                 bucket = 'northamerica-northeast1-ca-gbp-consumer-uat'
-                                tokenLowerEnv = env.NPE_TOKEN
                             } else if (params.PROMOTION_OPTION == 'UAT->PROD') {
                                 promoteFromEnv = 'UAT'
                                 promoteToEnv = 'PROD'
                                 bucket = 'abcd' // Replace 'abcd' with the actual PROD bucket name
-                                tokenLowerEnv = env.UAT_PROD_TOKEN
                             }
 
                             // Step sequence before promote
                             if (params.REPUBLISH_BEFORE_PROMOTING.toBoolean()) {
-                                unpublish(promoteFromEnv, customer, name, bu, parentDAGFolder, tokenLowerEnv)
-                                publish(promoteFromEnv, customer, name, bu, parentDAGFolder, tokenLowerEnv)
+                                unpublish(promoteFromEnv, customer, name, bu, parentDAGFolder)
+                                publish(promoteFromEnv, customer, name, bu, parentDAGFolder)
                             }
 
-                            unpublish(promoteToEnv, customer, name, bu, parentDAGFolder, tokenHigherEnv)
-                            promote(promoteFromEnv, promoteToEnv, customer, name, bu, parentDAGFolder, bucket, tokenLowerEnv)
+                            unpublish(promoteToEnv, customer, name, bu, parentDAGFolder)
+                            promote(promoteFromEnv, promoteToEnv, customer, name, bu, parentDAGFolder, bucket)
 
                             // Store data for post-promote steps
                             pipelineData << [
@@ -185,9 +192,7 @@ pipeline {
                                 bu: bu,
                                 parentDAGFolder: parentDAGFolder,
                                 promoteToEnv: promoteToEnv,
-                                tokenHigherEnv: tokenHigherEnv,
-                                lowerEnv: promoteFromEnv,
-                                tokenLowerEnv: tokenLowerEnv
+                                lowerEnv: promoteFromEnv
                             ]
 
                             summaryReport[pipeline] = 'Promotion initiated successfully.'
@@ -205,10 +210,10 @@ pipeline {
                     pipelineData.each { data ->
                         try {
                             // Publish in higher environment
-                            publish(data.promoteToEnv, data.customer, data.name, data.bu, data.parentDAGFolder, data.tokenHigherEnv)
+                            publish(data.promoteToEnv, data.customer, data.name, data.bu, data.parentDAGFolder)
 
                             if (!params.KEEP_PUBLISHED_LOWER_ENV.toBoolean()) {
-                                unpublish(data.lowerEnv, data.customer, data.name, data.bu, data.parentDAGFolder, data.tokenLowerEnv)
+                                unpublish(data.lowerEnv, data.customer, data.name, data.bu, data.parentDAGFolder)
                             }
 
                             summaryReport["${data.customer}/${data.name}"] += ' Post-promotion steps completed successfully.'
