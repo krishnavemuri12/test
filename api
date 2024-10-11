@@ -2,18 +2,18 @@ pipeline {
     agent any
 
     parameters {
-        choice(name: 'PROMOTION_TYPE', choices: ['NPE->UAT->PROD', 'NPE->UAT', 'UAT->PROD'], description: 'Select the promotion path')
-        booleanParam(name: 'REPUBLISH_BEFORE_PROMOTE', defaultValue: false, description: 'Republish before promoting')
+        choice(name: 'PROMOTION_OPTION', choices: ['NPE->UAT->PROD', 'NPE->UAT', 'UAT->PROD'], description: 'Select promotion option')
+        booleanParam(name: 'REPUBLISH_BEFORE_PROMOTING', defaultValue: false, description: 'Republish before promoting')
         booleanParam(name: 'KEEP_PUBLISHED_LOWER_ENV', defaultValue: true, description: 'Keep published in lower environment after promoting')
         string(name: 'DAG_PREFIX', defaultValue: 'CAGBPOFLN_', description: 'DAG Prefix')
-        choice(name: 'RETRIES', choices: ['0', '1', '2'], description: 'Number of retries in case of failure')
+        choice(name: 'RETRIES', choices: ['0', '1', '2'], description: 'Number of retries')
         text(name: 'PIPELINE_LIST', description: 'List of pipelines to promote (one per line)')
+        string(name: 'EMAIL_RECIPIENT', description: 'Email address for summary report')
     }
 
     environment {
-        // Credentials IDs should match the ones stored in Jenkins
-        NPE_CREDENTIALS_ID = 'NPE_CREDENTIALS'
-        UAT_PROD_CREDENTIALS_ID = 'UAT_PROD_CREDENTIALS'
+        NPE_TOKEN = ''
+        UAT_PROD_TOKEN = ''
     }
 
     stages {
@@ -21,9 +21,9 @@ pipeline {
             steps {
                 script {
                     // Generate OAuth token for NPE
-                    withCredentials([usernamePassword(credentialsId: env.NPE_CREDENTIALS_ID, passwordVariable: 'NPE_CLIENT_SECRET', usernameVariable: 'NPE_CLIENT_ID')]) {
-                        def npeOauthUrl = "https://npe-auth.example.com/oauth2/token" // Replace with actual NPE OAuth URL
-                        def npeRequestBody = "client_id=${NPE_CLIENT_ID}&client_secret=${NPE_CLIENT_SECRET}&grant_type=client_credentials"
+                    withCredentials([usernamePassword(credentialsId: 'NPE_CREDENTIALS', passwordVariable: 'NPE_CLIENT_SECRET', usernameVariable: 'NPE_CLIENT_ID')]) {
+                        def npeOauthUrl = "https://npe-auth.example.com/oauth2/token"
+                        def npeRequestBody = "client_id=${env.NPE_CLIENT_ID}&client_secret=${env.NPE_CLIENT_SECRET}&grant_type=client_credentials"
                         def npeResponse = sh(script: """
                             curl -s -X POST -H 'Content-Type: application/x-www-form-urlencoded' -d '${npeRequestBody}' ${npeOauthUrl} | jq -r '.access_token'
                         """, returnStdout: true).trim()
@@ -37,9 +37,9 @@ pipeline {
                     }
 
                     // Generate OAuth token for UAT/PROD
-                    withCredentials([usernamePassword(credentialsId: env.UAT_PROD_CREDENTIALS_ID, passwordVariable: 'UAT_PROD_CLIENT_SECRET', usernameVariable: 'UAT_PROD_CLIENT_ID')]) {
-                        def uatProdOauthUrl = "https://uat-prod-auth.example.com/oauth2/token" // Replace with actual UAT/PROD OAuth URL
-                        def uatProdRequestBody = "client_id=${UAT_PROD_CLIENT_ID}&client_secret=${UAT_PROD_CLIENT_SECRET}&grant_type=client_credentials"
+                    withCredentials([usernamePassword(credentialsId: 'UAT_PROD_CREDENTIALS', passwordVariable: 'UAT_PROD_CLIENT_SECRET', usernameVariable: 'UAT_PROD_CLIENT_ID')]) {
+                        def uatProdOauthUrl = "https://uat-prod-auth.example.com/oauth2/token"
+                        def uatProdRequestBody = "client_id=${env.UAT_PROD_CLIENT_ID}&client_secret=${env.UAT_PROD_CLIENT_SECRET}&grant_type=client_credentials"
                         def uatProdResponse = sh(script: """
                             curl -s -X POST -H 'Content-Type: application/x-www-form-urlencoded' -d '${uatProdRequestBody}' ${uatProdOauthUrl} | jq -r '.access_token'
                         """, returnStdout: true).trim()
@@ -58,218 +58,156 @@ pipeline {
         stage('Validate Input') {
             steps {
                 script {
-                    def pipelines = params.PIPELINE_LIST.split('\n').collect { it.trim() }
-                    if (pipelines.isEmpty()) {
-                        error "No pipelines specified for promotion"
+                    if (params.PIPELINE_LIST.trim().isEmpty()) {
+                        error "Pipeline list is empty. Please provide at least one pipeline."
                     }
                 }
             }
         }
 
-        stage('Promote Pipelines') {
+        stage('Process Pipelines') {
             steps {
                 script {
-                    def pipelines = params.PIPELINE_LIST.split('\n').collect { it.trim() }
-
-                    pipelines.each { pipeline ->
-                        promotePipeline(pipeline)
+                    // Helper function to make API calls
+                    def makeApiCall = { url, method, body, token ->
+                        sh(script: """
+                            curl -s -X ${method} \\
+                            -H 'Content-Type: application/json' \\
+                            -H 'Authorization: Bearer ${token}' \\
+                            -d '${body}' \\
+                            '${url}'
+                        """, returnStdout: true).trim()
                     }
+
+                    // Define functions for actions
+                    def unpublish = { envName, customer, name, bu, parentDAGFolder, token ->
+                        def url = "https://${envName.toLowerCase()}.api.example.com/config/unpublish"
+                        def payload = groovy.json.JsonOutput.toJson([
+                            customer: customer,
+                            name: name,
+                            bu: bu,
+                            parentDAGFolder: parentDAGFolder
+                        ])
+                        makeApiCall(url, 'POST', payload, token)
+                        echo "Unpublish request sent to ${envName} for ${name}"
+                    }
+
+                    def publish = { envName, customer, name, bu, parentDAGFolder, token ->
+                        def url = "https://${envName.toLowerCase()}.api.example.com/config/publish"
+                        def payload = groovy.json.JsonOutput.toJson([
+                            customer: customer,
+                            name: name,
+                            bu: bu,
+                            parentDAGFolder: parentDAGFolder
+                        ])
+                        makeApiCall(url, 'POST', payload, token)
+                        echo "Publish request sent to ${envName} for ${name}"
+                    }
+
+                    def promote = { fromEnv, toEnv, customer, name, bu, parentDAGFolder, bucket, token ->
+                        def url = "https://${fromEnv.toLowerCase()}.api.example.com/config/promote"
+                        def payload = groovy.json.JsonOutput.toJson([
+                            customer: customer,
+                            name: name,
+                            bu: bu,
+                            parentDAGFolder: parentDAGFolder,
+                            bucket: bucket
+                        ])
+                        makeApiCall(url, 'POST', payload, token)
+                        echo "Promote request from ${fromEnv} to ${toEnv} for ${name}"
+                    }
+
+                    // Process pipelines
+                    def pipelines = params.PIPELINE_LIST.trim().split('\n')
+                    def retryCount = params.RETRIES.toInteger()
+                    def summaryReport = [:]
+                    def pipelineData = []
+
+                    // First, initiate promote calls for all pipelines
+                    pipelines.each { pipeline ->
+                        def (customer, name) = pipeline.trim().split('/')
+                        def parentDAGFolder = params.DAG_PREFIX + name.toUpperCase().replace('-', '_')
+                        def bu = 'ca'
+                        def tokenLowerEnv = env.NPE_TOKEN
+                        def tokenHigherEnv = env.UAT_PROD_TOKEN
+                        def promoteFromEnv
+                        def promoteToEnv
+                        def bucket
+
+                        try {
+                            if (params.PROMOTION_OPTION == 'NPE->UAT->PROD' || params.PROMOTION_OPTION == 'NPE->UAT') {
+                                promoteFromEnv = 'NPE'
+                                promoteToEnv = 'UAT'
+                                bucket = 'uat-bucket'
+                                tokenLowerEnv = env.NPE_TOKEN
+                            } else if (params.PROMOTION_OPTION == 'UAT->PROD') {
+                                promoteFromEnv = 'UAT'
+                                promoteToEnv = 'PROD'
+                                bucket = 'prod-bucket'
+                                tokenLowerEnv = env.UAT_PROD_TOKEN
+                            }
+
+                            // Step sequence before promote
+                            if (params.REPUBLISH_BEFORE_PROMOTING.toBoolean()) {
+                                unpublish(promoteFromEnv, customer, name, bu, parentDAGFolder, tokenLowerEnv)
+                                publish(promoteFromEnv, customer, name, bu, parentDAGFolder, tokenLowerEnv)
+                            }
+
+                            unpublish(promoteToEnv, customer, name, bu, parentDAGFolder, tokenHigherEnv)
+                            promote(promoteFromEnv, promoteToEnv, customer, name, bu, parentDAGFolder, bucket, tokenLowerEnv)
+
+                            // Store data for post-promote steps
+                            pipelineData << [
+                                customer: customer,
+                                name: name,
+                                bu: bu,
+                                parentDAGFolder: parentDAGFolder,
+                                promoteToEnv: promoteToEnv,
+                                tokenHigherEnv: tokenHigherEnv,
+                                lowerEnv: promoteFromEnv,
+                                tokenLowerEnv: tokenLowerEnv
+                            ]
+
+                            summaryReport[pipeline] = 'Promotion initiated successfully.'
+                        } catch (Exception e) {
+                            echo "Error initiating promotion for ${pipeline}: ${e.getMessage()}"
+                            summaryReport[pipeline] = "Error: ${e.getMessage()}"
+                        }
+                    }
+
+                    // Wait for promote operations to complete
+                    echo "Waiting for promote operations to complete..."
+                    sleep(time: 600, unit: 'SECONDS') // Wait for 10 minutes
+
+                    // Post-promote steps
+                    pipelineData.each { data ->
+                        try {
+                            // Publish in higher environment
+                            publish(data.promoteToEnv, data.customer, data.name, data.bu, data.parentDAGFolder, data.tokenHigherEnv)
+
+                            if (!params.KEEP_PUBLISHED_LOWER_ENV.toBoolean()) {
+                                unpublish(data.lowerEnv, data.customer, data.name, data.bu, data.parentDAGFolder, data.tokenLowerEnv)
+                            }
+
+                            summaryReport["${data.customer}/${data.name}"] += ' Post-promotion steps completed successfully.'
+                        } catch (Exception e) {
+                            echo "Error in post-promotion steps for ${data.customer}/${data.name}: ${e.getMessage()}"
+                            summaryReport["${data.customer}/${data.name}"] += " Error: ${e.getMessage()}"
+                        }
+                    }
+
+                    // Handle retries if necessary
+                    // (Implement retry logic here if required)
+
+                    // Send summary report
+                    def reportContent = summaryReport.collect { k, v -> "${k}: ${v}" }.join('\n')
+                    emailext(
+                        subject: "Pipeline Promotion Summary Report",
+                        body: reportContent,
+                        to: params.EMAIL_RECIPIENT
+                    )
                 }
             }
         }
     }
-
-    post {
-        always {
-            sendSummaryEmail()
-        }
-    }
-}
-
-// Function to promote a single pipeline
-def promotePipeline(String pipeline) {
-    def (customer, name) = pipeline.split('/')
-    def parentDAGFolder = "${params.DAG_PREFIX}${name.toUpperCase().replace('-', '_')}"
-
-    switch(params.PROMOTION_TYPE) {
-        case 'NPE->UAT->PROD':
-            promoteNpeUatProd(customer, name, parentDAGFolder)
-            break
-        case 'NPE->UAT':
-            promoteNpeUat(customer, name, parentDAGFolder)
-            break
-        case 'UAT->PROD':
-            promoteUatProd(customer, name, parentDAGFolder)
-            break
-        default:
-            error "Invalid PROMOTION_TYPE: ${params.PROMOTION_TYPE}"
-    }
-}
-
-// Promotion functions
-def promoteNpeUatProd(String customer, String name, String parentDAGFolder) {
-    if (params.REPUBLISH_BEFORE_PROMOTE) {
-        unpublish(customer, name, parentDAGFolder, 'NPE')
-        publish(customer, name, parentDAGFolder, 'NPE')
-    }
-
-    unpublish(customer, name, parentDAGFolder, 'UAT')
-    promote(customer, name, parentDAGFolder, 'NPE', 'UAT')
-    publish(customer, name, parentDAGFolder, 'UAT')
-
-    if (!params.KEEP_PUBLISHED_LOWER_ENV) {
-        unpublish(customer, name, parentDAGFolder, 'NPE')
-    }
-
-    unpublish(customer, name, parentDAGFolder, 'PROD')
-    promote(customer, name, parentDAGFolder, 'UAT', 'PROD')
-    publish(customer, name, parentDAGFolder, 'PROD')
-
-    if (!params.KEEP_PUBLISHED_LOWER_ENV) {
-        unpublish(customer, name, parentDAGFolder, 'UAT')
-    }
-}
-
-def promoteNpeUat(String customer, String name, String parentDAGFolder) {
-    if (params.REPUBLISH_BEFORE_PROMOTE) {
-        unpublish(customer, name, parentDAGFolder, 'NPE')
-        publish(customer, name, parentDAGFolder, 'NPE')
-    }
-
-    unpublish(customer, name, parentDAGFolder, 'UAT')
-    promote(customer, name, parentDAGFolder, 'NPE', 'UAT')
-    publish(customer, name, parentDAGFolder, 'UAT')
-
-    if (!params.KEEP_PUBLISHED_LOWER_ENV) {
-        unpublish(customer, name, parentDAGFolder, 'NPE')
-    }
-}
-
-def promoteUatProd(String customer, String name, String parentDAGFolder) {
-    unpublish(customer, name, parentDAGFolder, 'PROD')
-    promote(customer, name, parentDAGFolder, 'UAT', 'PROD')
-    publish(customer, name, parentDAGFolder, 'PROD')
-
-    if (!params.KEEP_PUBLISHED_LOWER_ENV) {
-        unpublish(customer, name, parentDAGFolder, 'UAT')
-    }
-}
-
-// Publish, unpublish, and promote functions
-def publish(String customer, String name, String parentDAGFolder, String env) {
-    def token = getTokenForEnv(env)
-    def apiUrl = getApiUrl(env)
-
-    def response = httpRequest(
-        url: "${apiUrl}/config/publish",
-        httpMode: 'POST',
-        contentType: 'APPLICATION_JSON',
-        customHeaders: [[name: 'Authorization', value: "Bearer ${token}"]],
-        requestBody: """
-        {
-            "customer": "${customer}",
-            "name": "${name}",
-            "bu": "ca",
-            "parentDAGFolder": "${parentDAGFolder}"
-        }
-        """
-    )
-
-    echo "Publish response (${env}): ${response.content}"
-    sleep(time: 5, unit: 'SECONDS')
-}
-
-def unpublish(String customer, String name, String parentDAGFolder, String env) {
-    def token = getTokenForEnv(env)
-    def apiUrl = getApiUrl(env)
-
-    def response = httpRequest(
-        url: "${apiUrl}/config/unpublish",
-        httpMode: 'POST',
-        contentType: 'APPLICATION_JSON',
-        customHeaders: [[name: 'Authorization', value: "Bearer ${token}"]],
-        requestBody: """
-        {
-            "customer": "${customer}",
-            "name": "${name}",
-            "bu": "ca",
-            "parentDAGFolder": "${parentDAGFolder}"
-        }
-        """
-    )
-
-    echo "Unpublish response (${env}): ${response.content}"
-    sleep(time: 5, unit: 'SECONDS')
-}
-
-def promote(String customer, String name, String parentDAGFolder, String fromEnv, String toEnv) {
-    def token = getTokenForEnv(fromEnv)
-    def apiUrl = getApiUrl(fromEnv)
-    def bucket = getBucketName(toEnv)
-
-    def response = httpRequest(
-        url: "${apiUrl}/config/promote",
-        httpMode: 'POST',
-        contentType: 'APPLICATION_JSON',
-        customHeaders: [[name: 'Authorization', value: "Bearer ${token}"]],
-        requestBody: """
-        {
-            "customer": "${customer}",
-            "name": "${name}",
-            "bu": "ca",
-            "parentDAGFolder": "${parentDAGFolder}",
-            "bucket": "${bucket}"
-        }
-        """
-    )
-
-    echo "Promote response (${fromEnv} -> ${toEnv}): ${response.content}"
-    sleep(time: 300, unit: 'SECONDS')  // Wait for 5 minutes after promote
-}
-
-// Helper functions
-def getTokenForEnv(String env) {
-    switch(env) {
-        case 'NPE':
-            return env.NPE_TOKEN
-        case 'UAT':
-        case 'PROD':
-            return env.UAT_PROD_TOKEN
-        default:
-            error "Invalid environment: ${env}"
-    }
-}
-
-def getApiUrl(String env) {
-    // Replace with actual API URLs for each environment
-    switch(env) {
-        case 'NPE':
-            return 'https://api.npe.example.com' // Replace with actual NPE API URL
-        case 'UAT':
-            return 'https://api.uat.example.com' // Replace with actual UAT API URL
-        case 'PROD':
-            return 'https://api.prod.example.com' // Replace with actual PROD API URL
-        default:
-            error "Invalid environment: ${env}"
-    }
-}
-
-def getBucketName(String env) {
-    // Replace with actual bucket names for each environment
-    switch(env) {
-        case 'UAT':
-            return 'northamerica-northeast1-ca-gbp-consumer-uat' // Replace with actual UAT bucket name
-        case 'PROD':
-            return 'northamerica-northeast1-ca-gbp-consumer-prod' // Replace with actual PROD bucket name
-        default:
-            error "Invalid environment for bucket: ${env}"
-    }
-}
-
-def sendSummaryEmail() {
-    emailext (
-        subject: "Pipeline Promotion Summary",
-        body: "Promotion summary for job ${env.JOB_NAME} (${env.BUILD_NUMBER}):\n\n${currentBuild.description}",
-        recipientProviders: [[$class: 'DevelopersRecipientProvider']]
-    )
 }
