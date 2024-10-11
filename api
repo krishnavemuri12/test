@@ -11,12 +11,23 @@ pipeline {
     }
 
     environment {
-        NPE_OAUTH_TOKEN = credentials('npe-oauth-token')
-        UAT_OAUTH_TOKEN = credentials('uat-oauth-token')
-        PROD_OAUTH_TOKEN = credentials('prod-oauth-token')
+        NPE_CREDENTIALS = credentials('GBP-OUTBOUND-NPE')
+        UAT_CREDENTIALS = credentials('GBP-OUTBOUND-UAT')
+        PROD_CREDENTIALS = credentials('GBP-OUTBOUND-PROD')
     }
 
     stages {
+        stage('Generate OAuth 2.0 Tokens') {
+            steps {
+                script {
+                    // Generate tokens for each environment using environment-specific functions
+                    env.NPE_TOKEN = generateOAuthTokenNPE(env.NPE_CREDENTIALS_USR, env.NPE_CREDENTIALS_PSW)
+                    env.UAT_TOKEN = generateOAuthTokenUAT(env.UAT_CREDENTIALS_USR, env.UAT_CREDENTIALS_PSW)
+                    env.PROD_TOKEN = generateOAuthTokenPROD(env.PROD_CREDENTIALS_USR, env.PROD_CREDENTIALS_PSW)
+                }
+            }
+        }
+
         stage('Validate Input') {
             steps {
                 script {
@@ -32,7 +43,7 @@ pipeline {
             steps {
                 script {
                     def pipelines = params.PIPELINE_LIST.split('\n').collect { it.trim() }
-                    
+
                     pipelines.each { pipeline ->
                         promotePipeline(pipeline)
                     }
@@ -45,6 +56,48 @@ pipeline {
         always {
             sendSummaryEmail()
         }
+    }
+}
+
+// Generate OAuth token for NPE environment
+def generateOAuthTokenNPE(clientId, clientSecret) {
+    def oauthUrl = "https://npe-auth.example.com/token" // Replace with actual NPE OAuth URL
+    def requestBody = "client_id=${clientId}&client_secret=${clientSecret}&grant_type=client_credentials"
+    def accessToken = sh(script: "curl -s -X POST -H 'Content-Type: application/x-www-form-urlencoded' -d '${requestBody}' ${oauthUrl} | jq -r '.access_token'", returnStdout: true).trim()
+
+    if (accessToken) {
+        echo "OAuth Token Request Successful for NPE"
+        return accessToken
+    } else {
+        error("Failed to obtain OAuth token for NPE")
+    }
+}
+
+// Generate OAuth token for UAT environment
+def generateOAuthTokenUAT(clientId, clientSecret) {
+    def oauthUrl = "https://uat-auth.example.com/token" // Replace with actual UAT OAuth URL
+    def requestBody = "client_id=${clientId}&client_secret=${clientSecret}&grant_type=client_credentials"
+    def accessToken = sh(script: "curl -s -X POST -H 'Content-Type: application/x-www-form-urlencoded' -d '${requestBody}' ${oauthUrl} | jq -r '.access_token'", returnStdout: true).trim()
+
+    if (accessToken) {
+        echo "OAuth Token Request Successful for UAT"
+        return accessToken
+    } else {
+        error("Failed to obtain OAuth token for UAT")
+    }
+}
+
+// Generate OAuth token for PROD environment
+def generateOAuthTokenPROD(clientId, clientSecret) {
+    def oauthUrl = "https://prod-auth.example.com/token" // Replace with actual PROD OAuth URL
+    def requestBody = "client_id=${clientId}&client_secret=${clientSecret}&grant_type=client_credentials"
+    def accessToken = sh(script: "curl -s -X POST -H 'Content-Type: application/x-www-form-urlencoded' -d '${requestBody}' ${oauthUrl} | jq -r '.access_token'", returnStdout: true).trim()
+
+    if (accessToken) {
+        echo "OAuth Token Request Successful for PROD"
+        return accessToken
+    } else {
+        error("Failed to obtain OAuth token for PROD")
     }
 }
 
@@ -66,7 +119,6 @@ def promotePipeline(String pipeline) {
 }
 
 def promoteNpeUatProd(String customer, String name, String parentDAGFolder) {
-    // Implementation for NPE->UAT->PROD promotion
     if (params.REPUBLISH_BEFORE_PROMOTE) {
         unpublish(customer, name, parentDAGFolder, 'NPE')
         publish(customer, name, parentDAGFolder, 'NPE')
@@ -90,7 +142,6 @@ def promoteNpeUatProd(String customer, String name, String parentDAGFolder) {
 }
 
 def promoteNpeUat(String customer, String name, String parentDAGFolder) {
-    // Implementation for NPE->UAT promotion
     if (params.REPUBLISH_BEFORE_PROMOTE) {
         unpublish(customer, name, parentDAGFolder, 'NPE')
         publish(customer, name, parentDAGFolder, 'NPE')
@@ -106,12 +157,6 @@ def promoteNpeUat(String customer, String name, String parentDAGFolder) {
 }
 
 def promoteUatProd(String customer, String name, String parentDAGFolder) {
-    // Implementation for UAT->PROD promotion
-    if (params.REPUBLISH_BEFORE_PROMOTE) {
-        unpublish(customer, name, parentDAGFolder, 'UAT')
-        publish(customer, name, parentDAGFolder, 'UAT')
-    }
-
     unpublish(customer, name, parentDAGFolder, 'PROD')
     promote(customer, name, parentDAGFolder, 'UAT', 'PROD')
     publish(customer, name, parentDAGFolder, 'PROD')
@@ -124,7 +169,7 @@ def promoteUatProd(String customer, String name, String parentDAGFolder) {
 def unpublish(String customer, String name, String parentDAGFolder, String env) {
     def token = getOAuthToken(env)
     def apiUrl = getApiUrl(env)
-    
+
     def response = httpRequest(
         url: "${apiUrl}/config/unpublish",
         httpMode: 'POST',
@@ -139,7 +184,7 @@ def unpublish(String customer, String name, String parentDAGFolder, String env) 
         }
         """
     )
-    
+
     echo "Unpublish response (${env}): ${response.content}"
     sleep(time: 5, unit: 'SECONDS')
 }
@@ -147,7 +192,7 @@ def unpublish(String customer, String name, String parentDAGFolder, String env) 
 def publish(String customer, String name, String parentDAGFolder, String env) {
     def token = getOAuthToken(env)
     def apiUrl = getApiUrl(env)
-    
+
     def response = httpRequest(
         url: "${apiUrl}/config/publish",
         httpMode: 'POST',
@@ -162,7 +207,7 @@ def publish(String customer, String name, String parentDAGFolder, String env) {
         }
         """
     )
-    
+
     echo "Publish response (${env}): ${response.content}"
     sleep(time: 5, unit: 'SECONDS')
 }
@@ -171,7 +216,7 @@ def promote(String customer, String name, String parentDAGFolder, String fromEnv
     def token = getOAuthToken(fromEnv)
     def apiUrl = getApiUrl(fromEnv)
     def bucket = getBucketName(toEnv)
-    
+
     def response = httpRequest(
         url: "${apiUrl}/config/promote",
         httpMode: 'POST',
@@ -187,7 +232,7 @@ def promote(String customer, String name, String parentDAGFolder, String fromEnv
         }
         """
     )
-    
+
     echo "Promote response (${fromEnv} -> ${toEnv}): ${response.content}"
     sleep(time: 300, unit: 'SECONDS')  // Wait for 5 minutes after promote
 }
@@ -195,11 +240,11 @@ def promote(String customer, String name, String parentDAGFolder, String fromEnv
 def getOAuthToken(String env) {
     switch(env) {
         case 'NPE':
-            return env.NPE_OAUTH_TOKEN
+            return env.NPE_TOKEN
         case 'UAT':
-            return env.UAT_OAUTH_TOKEN
+            return env.UAT_TOKEN
         case 'PROD':
-            return env.PROD_OAUTH_TOKEN
+            return env.PROD_TOKEN
         default:
             error "Invalid environment: ${env}"
     }
@@ -232,7 +277,6 @@ def getBucketName(String env) {
 }
 
 def sendSummaryEmail() {
-    // Implement email sending logic here
     emailext (
         subject: "Pipeline Promotion Summary",
         body: "Promotion summary for job ${env.JOB_NAME} (${env.BUILD_NUMBER}):\n\n${currentBuild.description}",
