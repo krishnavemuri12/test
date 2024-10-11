@@ -1,0 +1,284 @@
+pipeline {
+    agent any
+
+    parameters {
+        choice(name: 'PROMOTION_OPTION', choices: ['Option 1: NPE->UAT->PROD', 'Option 2: NPE->UAT', 'Option 3: UAT->PROD'], description: 'Select promotion option')
+        booleanParam(name: 'REPUBLISH_BEFORE_PROMOTING', defaultValue: false, description: 'Republish before promoting (Checkbox A)')
+        booleanParam(name: 'KEEP_PUBLISHED_LOWER_ENV', defaultValue: true, description: 'Keep published in lower environment after promoting (Checkbox B)')
+        string(name: 'DAG_PREFIX', defaultValue: 'CAGBPOFLN_', description: 'DAG Prefix (C)')
+        choice(name: 'RETRIES', choices: ['0', '1', '2'], description: 'Number of retries (D)')
+        text(name: 'PIPELINE_LIST', description: 'List of pipelines to promote (one per line)')
+        string(name: 'EMAIL_RECIPIENT', description: 'Email address for summary report')
+    }
+
+    environment {
+        NPE_TOKEN = ''
+        UAT_TOKEN = ''
+        PROD_TOKEN = ''
+    }
+
+    stages {
+        stage('Validate Input') {
+            steps {
+                script {
+                    def pipelines = params.PIPELINE_LIST.split('\n').collect { it.trim() }
+                    if (pipelines.isEmpty()) {
+                        error "No pipelines specified for promotion"
+                    }
+                }
+            }
+        }
+
+        stage('Generate OAuth Tokens') {
+            steps {
+                script {
+                    // Generate OAuth token for NPE
+                    withCredentials([usernamePassword(credentialsId: 'NPE_CREDENTIALS', passwordVariable: 'NPE_CLIENT_SECRET', usernameVariable: 'NPE_CLIENT_ID')]) {
+                        def npeOauthUrl = "https://ram-ntr-app.alpha.pk/oauth2/token" // Replace with actual NPE OAuth endpoint
+                        def npeRequestBody = "client_id=${env.NPE_CLIENT_ID}&client_secret=${env.NPE_CLIENT_SECRET}&grant_type=client_credentials"
+                        def npeResponse = sh(script: """
+                            curl -s -X POST -H 'Content-Type: application/x-www-form-urlencoded' -d '${npeRequestBody}' ${npeOauthUrl} | jq -r '.access_token'
+                        """, returnStdout: true).trim()
+
+                        if (npeResponse) {
+                            env.NPE_TOKEN = npeResponse
+                            echo "NPE OAuth Token obtained successfully."
+                        } else {
+                            error("Failed to obtain OAuth token for NPE.")
+                        }
+                    }
+
+                    // Generate OAuth token for UAT
+                    withCredentials([usernamePassword(credentialsId: 'UAT_CREDENTIALS', passwordVariable: 'UAT_CLIENT_SECRET', usernameVariable: 'UAT_CLIENT_ID')]) {
+                        def uatOauthUrl = "https://ram-ntr-app.uat.pk/oauth2/token" // Replace with actual UAT OAuth endpoint
+                        def uatRequestBody = "client_id=${env.UAT_CLIENT_ID}&client_secret=${env.UAT_CLIENT_SECRET}&grant_type=client_credentials"
+                        def uatResponse = sh(script: """
+                            curl -s -X POST -H 'Content-Type: application/x-www-form-urlencoded' -d '${uatRequestBody}' ${uatOauthUrl} | jq -r '.access_token'
+                        """, returnStdout: true).trim()
+
+                        if (uatResponse) {
+                            env.UAT_TOKEN = uatResponse
+                            echo "UAT OAuth Token obtained successfully."
+                        } else {
+                            error("Failed to obtain OAuth token for UAT.")
+                        }
+                    }
+
+                    // Generate OAuth token for PROD
+                    withCredentials([usernamePassword(credentialsId: 'PROD_CREDENTIALS', passwordVariable: 'PROD_CLIENT_SECRET', usernameVariable: 'PROD_CLIENT_ID')]) {
+                        def prodOauthUrl = "https://ram-ntr-app.prd.pk/oauth2/token" // Replace with actual PROD OAuth endpoint
+                        def prodRequestBody = "client_id=${env.PROD_CLIENT_ID}&client_secret=${env.PROD_CLIENT_SECRET}&grant_type=client_credentials"
+                        def prodResponse = sh(script: """
+                            curl -s -X POST -H 'Content-Type: application/x-www-form-urlencoded' -d '${prodRequestBody}' ${prodOauthUrl} | jq -r '.access_token'
+                        """, returnStdout: true).trim()
+
+                        if (prodResponse) {
+                            env.PROD_TOKEN = prodResponse
+                            echo "PROD OAuth Token obtained successfully."
+                        } else {
+                            error("Failed to obtain OAuth token for PROD.")
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Process Pipelines') {
+            steps {
+                // Split the processing into multiple stages using shell commands
+                script {
+                    def pipelines = params.PIPELINE_LIST.split('\n').collect { it.trim() }
+                    def retryCount = params.RETRIES.toInteger()
+                    def summaryReport = [:]
+
+                    // Iterate over each pipeline
+                    for (pipeline in pipelines) {
+                        def (customer, name) = pipeline.split('/')
+                        def parentDAGFolder = params.DAG_PREFIX + name.toUpperCase().replace('-', '_')
+                        def bu = 'ca'
+                        def attempt = 0
+                        def success = false
+
+                        while (attempt <= retryCount && !success) {
+                            attempt++
+                            try {
+                                echo "Processing pipeline: ${pipeline}, Attempt: ${attempt}"
+
+                                // Option 1: NPE -> UAT -> PROD
+                                if (params.PROMOTION_OPTION == 'Option 1: NPE->UAT->PROD') {
+                                    // Steps as per Option 1
+                                    // Implementing steps using shell commands
+
+                                    // Step 1 & 2: (Optional) Unpublish and Publish in NPE
+                                    if (params.REPUBLISH_BEFORE_PROMOTING) {
+                                        // Step 1: Unpublish in NPE
+                                        sh """
+                                        curl -s -X POST -H 'Content-Type: application/json' -H 'Authorization: Bearer ${env.NPE_TOKEN}' -d '{
+                                            "customer": "${customer}",
+                                            "name": "${name}",
+                                            "bu": "${bu}",
+                                            "parentDAGFolder": "${parentDAGFolder}"
+                                        }' 'https://ram-ntr-app.alpha.pk/config/unpublish'
+                                        """
+                                        echo "Unpublished in NPE (if existed)"
+                                        sleep 5
+
+                                        // Step 2: Publish in NPE
+                                        sh """
+                                        curl -s -X POST -H 'Content-Type: application/json' -H 'Authorization: Bearer ${env.NPE_TOKEN}' -d '{
+                                            "customer": "${customer}",
+                                            "name": "${name}",
+                                            "bu": "${bu}",
+                                            "parentDAGFolder": "${parentDAGFolder}"
+                                        }' 'https://ram-ntr-app.alpha.pk/config/publish'
+                                        """
+                                        echo "Published in NPE"
+                                        sleep 5
+                                    }
+
+                                    // Step 3: Unpublish in UAT
+                                    sh """
+                                    curl -s -X POST -H 'Content-Type: application/json' -H 'Authorization: Bearer ${env.UAT_TOKEN}' -d '{
+                                        "customer": "${customer}",
+                                        "name": "${name}",
+                                        "bu": "${bu}",
+                                        "parentDAGFolder": "${parentDAGFolder}"
+                                    }' 'https://ram-ntr-app.uat.pk/config/unpublish'
+                                    """
+                                    echo "Unpublished in UAT (if existed)"
+                                    sleep 5
+
+                                    // Step 4: Promote from NPE to UAT
+                                    sh """
+                                    curl -s -X POST -H 'Content-Type: application/json' -H 'Authorization: Bearer ${env.NPE_TOKEN}' -d '{
+                                        "customer": "${customer}",
+                                        "name": "${name}",
+                                        "bu": "${bu}",
+                                        "parentDAGFolder": "${parentDAGFolder}",
+                                        "bucket": "northamerica-northeast1-ca-gbp-consumer-uat"
+                                    }' 'https://ram-ntr-app.alpha.pk/config/promote'
+                                    """
+                                    echo "Promotion from NPE to UAT initiated"
+                                    sleep 5
+
+                                    // Step 5: Publish in UAT
+                                    sh """
+                                    curl -s -X POST -H 'Content-Type: application/json' -H 'Authorization: Bearer ${env.UAT_TOKEN}' -d '{
+                                        "customer": "${customer}",
+                                        "name": "${name}",
+                                        "bu": "${bu}",
+                                        "parentDAGFolder": "${parentDAGFolder}"
+                                    }' 'https://ram-ntr-app.uat.pk/config/publish'
+                                    """
+                                    echo "Published in UAT"
+                                    sleep 5
+
+                                    // Step 6: (Optional) Unpublish in NPE
+                                    if (!params.KEEP_PUBLISHED_LOWER_ENV) {
+                                        sh """
+                                        curl -s -X POST -H 'Content-Type: application/json' -H 'Authorization: Bearer ${env.NPE_TOKEN}' -d '{
+                                            "customer": "${customer}",
+                                            "name": "${name}",
+                                            "bu": "${bu}",
+                                            "parentDAGFolder": "${parentDAGFolder}"
+                                        }' 'https://ram-ntr-app.alpha.pk/config/unpublish'
+                                        """
+                                        echo "Unpublished in NPE"
+                                        sleep 5
+                                    }
+
+                                    // Step 7: Unpublish in PROD
+                                    sh """
+                                    curl -s -X POST -H 'Content-Type: application/json' -H 'Authorization: Bearer ${env.PROD_TOKEN}' -d '{
+                                        "customer": "${customer}",
+                                        "name": "${name}",
+                                        "bu": "${bu}",
+                                        "parentDAGFolder": "${parentDAGFolder}"
+                                    }' 'https://ram-ntr-app.prd.pk/config/unpublish'
+                                    """
+                                    echo "Unpublished in PROD (if existed)"
+                                    sleep 5
+
+                                    // Step 8: Promote from UAT to PROD
+                                    sh """
+                                    curl -s -X POST -H 'Content-Type: application/json' -H 'Authorization: Bearer ${env.UAT_TOKEN}' -d '{
+                                        "customer": "${customer}",
+                                        "name": "${name}",
+                                        "bu": "${bu}",
+                                        "parentDAGFolder": "${parentDAGFolder}",
+                                        "bucket": "your-prod-bucket-name"
+                                    }' 'https://ram-ntr-app.uat.pk/config/promote'
+                                    """
+                                    echo "Promotion from UAT to PROD initiated"
+                                    sleep 5
+
+                                    // Step 9: Publish in PROD
+                                    sh """
+                                    curl -s -X POST -H 'Content-Type: application/json' -H 'Authorization: Bearer ${env.PROD_TOKEN}' -d '{
+                                        "customer": "${customer}",
+                                        "name": "${name}",
+                                        "bu": "${bu}",
+                                        "parentDAGFolder": "${parentDAGFolder}"
+                                    }' 'https://ram-ntr-app.prd.pk/config/publish'
+                                    """
+                                    echo "Published in PROD"
+                                    sleep 5
+
+                                    // Step 10: (Optional) Unpublish in UAT
+                                    if (!params.KEEP_PUBLISHED_LOWER_ENV) {
+                                        sh """
+                                        curl -s -X POST -H 'Content-Type: application/json' -H 'Authorization: Bearer ${env.UAT_TOKEN}' -d '{
+                                            "customer": "${customer}",
+                                            "name": "${name}",
+                                            "bu": "${bu}",
+                                            "parentDAGFolder": "${parentDAGFolder}"
+                                        }' 'https://ram-ntr-app.uat.pk/config/unpublish'
+                                        """
+                                        echo "Unpublished in UAT"
+                                        sleep 5
+                                    }
+
+                                    // Mark as success
+                                    success = true
+                                    summaryReport[pipeline] = "Successfully promoted ${pipeline} on attempt ${attempt}"
+
+                                } else if (params.PROMOTION_OPTION == 'Option 2: NPE->UAT') {
+                                    // Implement steps for Option 2 using shell commands
+                                    // Steps similar to Option 1 up to publishing in UAT
+                                    // Adjust the script accordingly
+                                    // [Implementation for Option 2]
+
+                                } else if (params.PROMOTION_OPTION == 'Option 3: UAT->PROD') {
+                                    // Implement steps for Option 3 using shell commands
+                                    // Adjust the script accordingly
+                                    // [Implementation for Option 3]
+                                }
+
+                            } catch (Exception e) {
+                                echo "Error during processing ${pipeline} on attempt ${attempt}: ${e.getMessage()}"
+                                if (attempt >= retryCount) {
+                                    summaryReport[pipeline] = "Failed after ${attempt} attempts: ${e.getMessage()}"
+                                    echo "Max retries reached for ${pipeline}. Moving to next pipeline."
+                                    break
+                                } else {
+                                    echo "Retrying ${pipeline}..."
+                                    sleep(5)
+                                }
+                            }
+                        }
+                    }
+
+                    // Send summary report
+                    script {
+                        def reportContent = summaryReport.collect { k, v -> "${k}: ${v}" }.join('\n')
+                        emailext(
+                            subject: "Pipeline Promotion Summary Report",
+                            body: reportContent,
+                            to: params.EMAIL_RECIPIENT
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
