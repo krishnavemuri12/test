@@ -12,17 +12,17 @@ pipeline {
 
     environment {
         NPE_CREDENTIALS = credentials('npe-credentials')
-        UAT_CREDENTIALS = credentials('uat-credentials')
-        PROD_CREDENTIALS = credentials('prod-credentials')
+        UAT_PROD_CREDENTIALS = credentials('uat-prod-credentials')
+        NPE_AUTH_URL = 'https://npe-auth-url.com/oauth/token'
+        UAT_PROD_AUTH_URL = 'https://uat-prod-auth-url.com/oauth/token'
     }
 
     stages {
         stage('Generate OAuth Tokens') {
             steps {
                 script {
-                    env.NPE_TOKEN = getOAuthToken(env.NPE_CREDENTIALS_USR, env.NPE_CREDENTIALS_PSW, 'NPE')
-                    env.UAT_TOKEN = getOAuthToken(env.UAT_CREDENTIALS_USR, env.UAT_CREDENTIALS_PSW, 'UAT')
-                    env.PROD_TOKEN = getOAuthToken(env.PROD_CREDENTIALS_USR, env.PROD_CREDENTIALS_PSW, 'PROD')
+                    env.NPE_TOKEN = getOAuthToken(env.NPE_CREDENTIALS_USR, env.NPE_CREDENTIALS_PSW, env.NPE_AUTH_URL)
+                    env.UAT_PROD_TOKEN = getOAuthToken(env.UAT_PROD_CREDENTIALS_USR, env.UAT_PROD_CREDENTIALS_PSW, env.UAT_PROD_AUTH_URL)
                 }
             }
         }
@@ -55,13 +55,12 @@ pipeline {
     }
 }
 
-def getOAuthToken(clientId, clientSecret, env) {
-    def oauthUrl = "https://fedsso/as/token.oauth2"
+def getOAuthToken(clientId, clientSecret, authUrl) {
     def requestBody = "client_id=${clientId}&client_secret=${clientSecret}&grant_type=client_credentials"
-    def response = sh(script: "curl -s -X POST -H 'Content-Type: application/x-www-form-urlencoded' -d '${requestBody}' ${oauthUrl}", returnStdout: true).trim()
+    def response = sh(script: "curl -s -X POST -H 'Content-Type: application/x-www-form-urlencoded' -d '${requestBody}' ${authUrl}", returnStdout: true).trim()
     def token = readJSON(text: response).access_token
     if (!token) {
-        error("Failed to obtain OAuth token for ${env}")
+        error("Failed to obtain OAuth token from ${authUrl}")
     }
     return token
 }
@@ -139,7 +138,7 @@ def unpublishAndPromote(fromEnv, toEnv, customer, name, dagFolder) {
 }
 
 def unpublish(env, customer, name, dagFolder) {
-    def token = env == 'NPE' ? env.NPE_TOKEN : (env == 'UAT' ? env.UAT_TOKEN : env.PROD_TOKEN)
+    def token = env == 'NPE' ? env.NPE_TOKEN : env.UAT_PROD_TOKEN
     def apiUrl = getUnpublishUrl(env)
     def requestBody = [
         customer: customer,
@@ -154,7 +153,7 @@ def unpublish(env, customer, name, dagFolder) {
 }
 
 def publish(env, customer, name, dagFolder) {
-    def token = env == 'NPE' ? env.NPE_TOKEN : (env == 'UAT' ? env.UAT_TOKEN : env.PROD_TOKEN)
+    def token = env == 'NPE' ? env.NPE_TOKEN : env.UAT_PROD_TOKEN
     def apiUrl = getPublishUrl(env)
     def requestBody = [
         customer: customer,
@@ -172,7 +171,7 @@ def publish(env, customer, name, dagFolder) {
 }
 
 def promote(fromEnv, toEnv, customer, name, dagFolder) {
-    def token = fromEnv == 'NPE' ? env.NPE_TOKEN : env.UAT_TOKEN
+    def token = fromEnv == 'NPE' ? env.NPE_TOKEN : env.UAT_PROD_TOKEN
     def apiUrl = getPromoteUrl(fromEnv)
     def bucket = toEnv == 'UAT' ? 'northamerica-northeast1-ca-gbp-consumer-uat' : 'abcd'
     def requestBody = [
