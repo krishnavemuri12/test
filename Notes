@@ -1,0 +1,96 @@
+The requirements outline a Jenkins job that automates the promotion of pipeline configurations across different environments: NPE (Non-Production Environment), UAT (User Acceptance Testing), and PROD (Production). This promotion job will help reduce operational workload by providing controlled and repeatable steps for deploying configurations in different environments. Here’s a breakdown of the functionality and options required:
+
+Promotion Options
+
+1. NPE → UAT → PROD: Full promotion path across all three environments.
+
+
+2. NPE → UAT: Partial promotion, only from NPE to UAT.
+
+
+3. UAT → PROD: Promotion directly from UAT to PROD.
+
+
+
+Options for Promotion
+
+For each of the above options, there are additional customizable settings:
+
+Republish before promoting: A checkbox to decide if the pipeline should be republished in the lower environment before promotion.
+
+Keep published in lower environment after promoting: A checkbox to decide if the pipeline should remain published in the lower environment after promotion.
+
+DAG Prefix: A text input with a default value (CAGBPOFLN_) that can be edited.
+
+Retries: A dropdown menu to choose the number of retry attempts (0, 1, or 2) if a step fails.
+
+
+Input to the Jenkins Job
+
+The job will accept a list of pipelines to be promoted. Each pipeline is represented by a string indicating the customer and the pipeline name.
+
+
+Steps for Promotion
+
+Each promotion path has specific steps that include publishing, unpublishing, and promoting actions. Here’s an overview of the steps for the full NPE → UAT → PROD path (Option 1):
+
+1. Unpublish in NPE (if republish is selected): Attempt to unpublish the pipeline in NPE.
+
+
+2. Publish in NPE (if republish is selected): Publish the pipeline in NPE and check for errors.
+
+
+3. Unpublish in UAT: Unpublish the pipeline in UAT to prepare for promotion.
+
+
+4. Promote from NPE to UAT: Promote the pipeline from NPE to UAT, logging any errors if this step fails.
+
+
+5. Publish in UAT: Publish the pipeline in UAT and handle any errors.
+
+
+6. Unpublish in NPE (if keeping published in lower environment is NOT selected): Optionally unpublish the pipeline in NPE if required.
+
+
+7. Unpublish in PROD: Unpublish the pipeline in PROD, in preparation for promotion.
+
+
+8. Promote from UAT to PROD: Promote the pipeline from UAT to PROD, capturing any errors in the log.
+
+
+9. Publish in PROD: Publish the pipeline in PROD and capture any errors.
+
+
+10. Unpublish in UAT (if keeping published in lower environment is NOT selected): Optionally unpublish the pipeline in UAT.
+
+
+
+For the partial promotion paths (NPE → UAT or UAT → PROD), only the respective steps are carried out.
+
+Sequence and Timing
+
+Step Switching: During the promotion step (which can take up to 10 minutes), the job should proceed with other pipelines instead of waiting idly.
+
+Retry Mechanism: If a failure occurs and retries are set to 1 or 2, the job should repeat the entire process from the beginning for the specified number of times.
+
+
+Summary Report
+
+At the end of the process, the job will send a summary report via email that details whether each pipeline promotion was successful or if there were any failures.
+
+OAuth2 Tokens
+
+Each step requires an OAuth2 token specific to the environment in which the action is performed. Tokens need to be generated before the job starts.
+
+
+API Payloads for Requests
+
+The job constructs the request payload for each pipeline based on its customer, pipeline name, and configured DAG Prefix. For example:
+
+Unpublish/Publish API: Uses customer and name details to identify the pipeline and the environment endpoint.
+
+Promote API: Uses the DAG Prefix, bucket information, and pipeline details for promotion requests.
+
+
+These requirements will allow the Jenkins job to automate and streamline the promotion process while ensuring operational controls are maintained.
+
