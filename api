@@ -79,9 +79,17 @@ pipeline {
                         """, returnStdout: true).trim()
                     }
 
-                    // Define functions for actions
+                    // Define functions for actions with hardcoded endpoints
                     def unpublish = { envName, customer, name, bu, parentDAGFolder, token ->
-                        def url = "https://${envName.toLowerCase()}.api.example.com/config/unpublish"
+                        def url = ''
+                        if (envName == 'NPE') {
+                            url = 'https://ram-ntr-app.alpha.pk/config/unpublish'
+                        } else if (envName == 'UAT') {
+                            url = 'https://ram-ntr-app.uat.pk/config/unpublish'
+                        } else if (envName == 'PROD') {
+                            url = 'https://ram-ntr-app.prd.pk/config/unpublish'
+                        }
+
                         def payload = groovy.json.JsonOutput.toJson([
                             customer: customer,
                             name: name,
@@ -93,7 +101,15 @@ pipeline {
                     }
 
                     def publish = { envName, customer, name, bu, parentDAGFolder, token ->
-                        def url = "https://${envName.toLowerCase()}.api.example.com/config/publish"
+                        def url = ''
+                        if (envName == 'NPE') {
+                            url = 'https://ram-ntr-app.alpha.pk/config/publish'
+                        } else if (envName == 'UAT') {
+                            url = 'https://ram-ntr-app.uat.pk/config/publish'
+                        } else if (envName == 'PROD') {
+                            url = 'https://ram-ntr-app.prd.pk/config/publish'
+                        }
+
                         def payload = groovy.json.JsonOutput.toJson([
                             customer: customer,
                             name: name,
@@ -105,7 +121,13 @@ pipeline {
                     }
 
                     def promote = { fromEnv, toEnv, customer, name, bu, parentDAGFolder, bucket, token ->
-                        def url = "https://${fromEnv.toLowerCase()}.api.example.com/config/promote"
+                        def url = ''
+                        if (fromEnv == 'NPE' && toEnv == 'UAT') {
+                            url = 'https://ram-ntr-app.alpha.pk/config/promote'
+                        } else if (fromEnv == 'UAT' && toEnv == 'PROD') {
+                            url = 'https://ram-ntr-app.uat.pk/config/promote'
+                        }
+
                         def payload = groovy.json.JsonOutput.toJson([
                             customer: customer,
                             name: name,
@@ -138,12 +160,12 @@ pipeline {
                             if (params.PROMOTION_OPTION == 'NPE->UAT->PROD' || params.PROMOTION_OPTION == 'NPE->UAT') {
                                 promoteFromEnv = 'NPE'
                                 promoteToEnv = 'UAT'
-                                bucket = 'uat-bucket'
+                                bucket = 'northamerica-northeast1-ca-gbp-consumer-uat'
                                 tokenLowerEnv = env.NPE_TOKEN
                             } else if (params.PROMOTION_OPTION == 'UAT->PROD') {
                                 promoteFromEnv = 'UAT'
                                 promoteToEnv = 'PROD'
-                                bucket = 'prod-bucket'
+                                bucket = 'abcd' // Replace 'abcd' with the actual PROD bucket name
                                 tokenLowerEnv = env.UAT_PROD_TOKEN
                             }
 
@@ -195,9 +217,6 @@ pipeline {
                             summaryReport["${data.customer}/${data.name}"] += " Error: ${e.getMessage()}"
                         }
                     }
-
-                    // Handle retries if necessary
-                    // (Implement retry logic here if required)
 
                     // Send summary report
                     def reportContent = summaryReport.collect { k, v -> "${k}: ${v}" }.join('\n')
