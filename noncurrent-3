@@ -1,0 +1,62 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'SOURCE_BUCKET_PATH', defaultValue: '', description: 'Path to the source GCS bucket folder')
+    }
+
+    stages {
+        stage('List All Files Including Non-Current Versions') {
+            steps {
+                script {
+                    // List all files and non-current versions in the bucket folder
+                    def filesWithVersions = sh(returnStdout: true, script: """
+                        gsutil ls -a gs://${params.SOURCE_BUCKET_PATH}
+                    """).trim().split("\n")
+
+                    // Filter and group files based on version and log them
+                    echo "Files with Versions: ${filesWithVersions}"
+                }
+            }
+        }
+
+        stage('Rename Archived Versions') {
+            steps {
+                script {
+                    // Dictionary to store files and their versions
+                    def fileVersionMap = [:]
+
+                    // Iterate through each file and its versions
+                    filesWithVersions.each { version ->
+                        def fileName = version.split('/').last().split('#')[0] // Extract file name (without version)
+
+                        // If file is not current, increment version count and rename
+                        if (version.contains('#')) {
+                            def versionNumber = fileVersionMap.getOrDefault(fileName, 0) + 1
+                            def newFileName = "${fileName}-${versionNumber}"
+
+                            // Update the version count for the file
+                            fileVersionMap[fileName] = versionNumber
+
+                            echo "Renaming archived version: ${fileName} to ${newFileName}"
+                            
+                            // Copy the renamed archived file back to the source bucket with a new name
+                            sh """
+                                gsutil cp ${version} gs://${params.SOURCE_BUCKET_PATH}/${newFileName}
+                            """
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Archived versions renamed and copied successfully!"
+        }
+        failure {
+            echo "Pipeline failed. Please check the logs."
+        }
+    }
+}
