@@ -1,0 +1,53 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'SOURCE_BUCKET_PATH', defaultValue: '', description: 'Path to the source GCS bucket folder')
+        string(name: 'DESTINATION_BUCKET_PATH', defaultValue: '', description: 'Path to the destination GCS bucket folder')
+    }
+
+    stages {
+        stage('List Archived Versions') {
+            steps {
+                script {
+                    // List all objects with versions in the source bucket
+                    def archivedVersions = sh(returnStdout: true, script: """
+                        gsutil ls -a gs://${params.SOURCE_BUCKET_PATH}
+                    """).trim().split("\n")
+                    
+                    // Filter out only archived versions and log them
+                    echo "Found Archived Versions: ${archivedVersions}"
+                }
+            }
+        }
+
+        stage('Rename Archived Versions') {
+            steps {
+                script {
+                    def index = 1
+                    archivedVersions.each { version ->
+                        def fileName = version.split('/').last().split('#')[0] // Extract file name
+                        def newFileName = "${fileName}-${index}" // Rename sequentially
+                        index++
+
+                        echo "Renaming ${fileName} to ${newFileName}"
+                        
+                        // Copy to the destination bucket with new name
+                        sh """
+                            gsutil cp ${version} gs://${params.DESTINATION_BUCKET_PATH}/${newFileName}
+                        """
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Archived versions copied successfully!"
+        }
+        failure {
+            echo "Pipeline failed. Check the logs."
+        }
+    }
+}
