@@ -1,0 +1,87 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'GCS_BUCKET_PATH', defaultValue: '', description: 'GCS bucket folder path (e.g., bucket-name/folder/path)')
+    }
+
+    environment {
+        GOOGLE_APPLICATION_CREDENTIALS = credentials('gcp-credentials')
+    }
+
+    stages {
+        stage('Setup') {
+            steps {
+                script {
+                    // Ensure gsutil is installed and authenticated
+                    sh '''
+                        gcloud auth activate-service-account --key-file="$GOOGLE_APPLICATION_CREDENTIALS"
+                        gsutil version
+                    '''
+                }
+            }
+        }
+
+        stage('Retrieve and Sequence Files') {
+            steps {
+                script {
+                    // Shell script to retrieve and sequence files
+                    sh '''
+                        #!/bin/bash
+                        set -e
+
+                        # Function to extract filename from full path
+                        get_filename() {
+                            echo "${1##*/}"
+                        }
+
+                        # Split bucket and folder path
+                        IFS='/' read -r BUCKET_NAME FOLDER_PATH <<< "${GCS_BUCKET_PATH}"
+                        FOLDER_PATH="${GCS_BUCKET_PATH#*/}"
+
+                        # List all objects in the folder
+                        gsutil ls -la "gs://${GCS_BUCKET_PATH}/**" | sort -k2,2r > object_list.txt
+
+                        # Process objects
+                        current_file=""
+                        version_count=0
+
+                        while IFS= read -r line; do
+                            # Extract filename and generation
+                            filename=$(get_filename "$(echo "$line" | awk '{print $3}')")
+                            generation=$(echo "$line" | awk '{print $2}')
+
+                            if [ "$filename" != "$current_file" ]; then
+                                # New file encountered
+                                current_file="$filename"
+                                version_count=0
+                            else
+                                # Older version of the same file
+                                version_count=$((version_count + 1))
+                                new_name="${filename%.*}-${version_count}.${filename##*.}"
+                                
+                                echo "Processing: $filename (Generation: $generation)"
+                                echo "Renaming to: $new_name"
+                                
+                                # Copy the object with the new name
+                                gsutil cp "gs://${BUCKET_NAME}/${FOLDER_PATH}/${filename}#${generation}" "gs://${BUCKET_NAME}/${FOLDER_PATH}/${new_name}"
+                            fi
+                        done < object_list.txt
+
+                        # Clean up
+                        rm object_list.txt
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Successfully retrieved and sequenced files!'
+        }
+        failure {
+            echo 'Failed to retrieve and sequence files.'
+        }
+    }
+}
