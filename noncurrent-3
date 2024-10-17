@@ -3,24 +3,25 @@ pipeline {
 
     parameters {
         string(name: 'SOURCE_BUCKET_PATH', defaultValue: '', description: 'Path to the source GCS bucket folder')
+        string(name: 'DESTINATION_BUCKET_PATH', defaultValue: '', description: 'Path to the destination GCS bucket folder where renamed files will be copied')
     }
 
     stages {
         stage('List All Files Including Non-Current Versions') {
             steps {
                 script {
-                    // List all files and non-current versions in the bucket folder
+                    // List all files and non-current versions in the source bucket folder
                     def filesWithVersions = sh(returnStdout: true, script: """
                         gsutil ls -a gs://${params.SOURCE_BUCKET_PATH}
                     """).trim().split("\n")
 
-                    // Filter and group files based on version and log them
+                    // Log the files with versions
                     echo "Files with Versions: ${filesWithVersions}"
                 }
             }
         }
 
-        stage('Rename Archived Versions') {
+        stage('Rename and Copy Archived Versions') {
             steps {
                 script {
                     // Dictionary to store files and their versions
@@ -40,9 +41,9 @@ pipeline {
 
                             echo "Renaming archived version: ${fileName} to ${newFileName}"
                             
-                            // Copy the renamed archived file back to the source bucket with a new name
+                            // Copy the renamed archived file to the destination bucket with the new name
                             sh """
-                                gsutil cp ${version} gs://${params.SOURCE_BUCKET_PATH}/${newFileName}
+                                gsutil cp ${version} gs://${params.DESTINATION_BUCKET_PATH}/${newFileName}
                             """
                         }
                     }
@@ -53,7 +54,7 @@ pipeline {
 
     post {
         success {
-            echo "Archived versions renamed and copied successfully!"
+            echo "Archived versions renamed and copied to the destination bucket successfully!"
         }
         failure {
             echo "Pipeline failed. Please check the logs."
