@@ -2,20 +2,19 @@ pipeline {
     agent any
 
     parameters {
-        choice(name: 'PROMOTION_FLOW', choices: ['NPE->UAT->PROD', 'NPE->UAT', 'UAT->PROD'], description: 'Select Promotion Flow')
+        choice(name: 'PROMOTION_FLOW', choices: ['NPE->UAT->PROD'], description: 'Select Promotion Flow')
         booleanParam(name: 'REPUBLISH_BEFORE_PROMOTING', defaultValue: false, description: 'Republish before promoting')
         booleanParam(name: 'KEEP_PUBLISHED_IN_LOWER_ENV', defaultValue: true, description: 'Keep pipeline published in lower environment after promoting')
         string(name: 'DAG_PREFIX', defaultValue: 'CAGBPOFLN_', description: 'DAG Prefix')
         choice(name: 'RETRIES', choices: ['0', '1', '2'], description: 'Number of retries on failure')
         text(name: 'PIPELINES_TO_PROMOTE', description: 'List of pipelines to promote, one per line', defaultValue: 'dummy-customer/pipeline-name1\ndummy-customer/pipeline-name2')
+        string(name: 'EMAIL_ADDRESS', defaultValue: '', description: 'Email address to send the summary report')
     }
 
     environment {
         NPE_API = 'https://global-star.alpha.km/config/'
         UAT_API = 'https://global-star.uat.km/config/'
         PROD_API = 'https://global-star.prd.km/config/'
-        NPE_AUTH_URL = 'https://ram-ntr-app.npe.pk/oauth2/token'
-        UAT_PROD_AUTH_URL = 'https://ram-ntr-app.uat.pk/oauth2/token'
         BUCKET_UAT = 'northamerica-northeast1-ca-gbp-consumer-uat'
         BUCKET_PROD = 'northamerica-northeast1-ca-gbp-consumer-prd'
     }
@@ -60,53 +59,80 @@ pipeline {
             }
         }
 
-        // Step 2: Promote Pipelines based on selected flow
-        stage('Promote Pipelines') {
+        // Step 2: Promote Pipelines and Collect Summary (Steps 1-4)
+        stage('Promote Pipelines (Steps 1-4)') {
             steps {
                 script {
                     def pipelines = params.PIPELINES_TO_PROMOTE.split("\n")
                     def retries = params.RETRIES.toInteger()
+                    def summary = []
 
                     pipelines.each { pipeline ->
                         def customer = pipeline.split('/')[0]
                         def pipelineName = pipeline.split('/')[1]
                         def parentDAGFolder = "${params.DAG_PREFIX}${pipelineName.toUpperCase().replace('-', '_')}"
+                        def pipelineStatus = "Success"
+                        def retryCount = 0
 
                         retry(retries) {
-                            if (params.PROMOTION_FLOW == 'NPE->UAT->PROD' || params.PROMOTION_FLOW == 'NPE->UAT') {
-                                // Conditional based on checkbox A (Republish before promoting)
+                            try {
                                 if (params.REPUBLISH_BEFORE_PROMOTING) {
+                                    // Step 1: Unpublish in NPE (optional)
                                     unpublishInNPE(customer, pipelineName, parentDAGFolder)
+                                    
+                                    // Step 2: Publish in NPE (optional)
                                     publishInNPE(customer, pipelineName, parentDAGFolder)
                                 }
-
+                                
+                                // Step 3: Unpublish in UAT
                                 unpublishInUAT(customer, pipelineName, parentDAGFolder)
+                                
+                                // Step 4: Promote from NPE to UAT
                                 promoteNPEToUAT(customer, pipelineName, parentDAGFolder)
-
-                                // Wait for 5 minutes before publishing in UAT
-                                echo "Waiting for 5 minutes before publishing in UAT..."
-                                sleep(time: 5, unit: 'MINUTES')
-                                publishInUAT(customer, pipelineName, parentDAGFolder)
-
-                                // Optional: Unpublish in NPE after promotion (if checkbox B is NOT enabled)
-                                if (!params.KEEP_PUBLISHED_IN_LOWER_ENV) {
-                                    unpublishInNPE(customer, pipelineName, parentDAGFolder)
+                            } catch (Exception e) {
+                                retryCount += 1
+                                if (retryCount == retries) {
+                                    pipelineStatus = "Failed after ${retryCount} retries"
+                                    break
                                 }
                             }
+                        }
+                        // Collect the status for this pipeline
+                        summary.add("Pipeline: ${pipelineName}, Status: ${pipelineStatus}, Retries: ${retryCount}")
+                    }
+                    // Save summary to environment variable for email
+                    env.SUMMARY_REPORT = summary.join("\n")
+                }
+            }
+        }
 
-                            if (params.PROMOTION_FLOW == 'NPE->UAT->PROD' || params.PROMOTION_FLOW == 'UAT->PROD') {
-                                unpublishInPROD(customer, pipelineName, parentDAGFolder)
-                                promoteUATToPROD(customer, pipelineName, parentDAGFolder)
+        // Step 3: Wait 5 minutes after promoting all pipelines
+        stage('Wait After Promotion to UAT') {
+            steps {
+                script {
+                    echo "Waiting for 5 minutes after promotion before publishing in UAT..."
+                    sleep(time: 5, unit: 'MINUTES')
+                }
+            }
+        }
 
-                                // Wait for 5 minutes before publishing in PROD
-                                echo "Waiting for 5 minutes before publishing in PROD..."
-                                sleep(time: 5, unit: 'MINUTES')
-                                publishInPROD(customer, pipelineName, parentDAGFolder)
+        // Step 4: Publish Pipelines in UAT
+        stage('Publish Pipelines in UAT') {
+            steps {
+                script {
+                    def pipelines = params.PIPELINES_TO_PROMOTE.split("\n")
+                    
+                    pipelines.each { pipeline ->
+                        def customer = pipeline.split('/')[0]
+                        def pipelineName = pipeline.split('/')[1]
+                        def parentDAGFolder = "${params.DAG_PREFIX}${pipelineName.toUpperCase().replace('-', '_')}"
+                        
+                        retry(params.RETRIES.toInteger()) {
+                            publishInUAT(customer, pipelineName, parentDAGFolder)
 
-                                // Optional: Unpublish in UAT after promotion (if checkbox B is NOT enabled)
-                                if (!params.KEEP_PUBLISHED_IN_LOWER_ENV) {
-                                    unpublishInUAT(customer, pipelineName, parentDAGFolder)
-                                }
+                            // Optional: Unpublish in NPE after promotion (if checkbox B is NOT enabled)
+                            if (!params.KEEP_PUBLISHED_IN_LOWER_ENV) {
+                                unpublishInNPE(customer, pipelineName, parentDAGFolder)
                             }
                         }
                     }
@@ -114,12 +140,88 @@ pipeline {
             }
         }
 
-        // Final Step: Summary Report
-        stage('Summary Report') {
+        // Step 5: Promote Pipelines from UAT to PROD (Steps 7-8)
+        stage('Promote Pipelines from UAT to PROD') {
             steps {
                 script {
-                    echo "Promotion process completed successfully."
-                    // You can add logic here to send email reports if needed
+                    def pipelines = params.PIPELINES_TO_PROMOTE.split("\n")
+                    
+                    pipelines.each { pipeline ->
+                        def customer = pipeline.split('/')[0]
+                        def pipelineName = pipeline.split('/')[1]
+                        def parentDAGFolder = "${params.DAG_PREFIX}${pipelineName.toUpperCase().replace('-', '_')}"
+                        
+                        retry(params.RETRIES.toInteger()) {
+                            // Step 7: Unpublish in PROD
+                            unpublishInPROD(customer, pipelineName, parentDAGFolder)
+                            
+                            // Step 8: Promote from UAT to PROD
+                            promoteUATToPROD(customer, pipelineName, parentDAGFolder)
+                        }
+                    }
+                }
+            }
+        }
+
+        // Step 6: Wait 5 minutes after promoting all pipelines to PROD
+        stage('Wait Before Publishing in PROD') {
+            steps {
+                script {
+                    echo "Waiting for 5 minutes after promotion to PROD..."
+                    sleep(time: 5, unit: 'MINUTES')
+                }
+            }
+        }
+
+        // Step 7: Publish Pipelines in PROD
+        stage('Publish Pipelines in PROD') {
+            steps {
+                script {
+                    def pipelines = params.PIPELINES_TO_PROMOTE.split("\n")
+                    
+                    pipelines.each { pipeline ->
+                        def customer = pipeline.split('/')[0]
+                        def pipelineName = pipeline.split('/')[1]
+                        def parentDAGFolder = "${params.DAG_PREFIX}${pipelineName.toUpperCase().replace('-', '_')}"
+                        
+                        retry(params.RETRIES.toInteger()) {
+                            publishInPROD(customer, pipelineName, parentDAGFolder)
+
+                            // Optional: Unpublish in UAT after promotion (if checkbox B is NOT enabled)
+                            if (!params.KEEP_PUBLISHED_IN_LOWER_ENV) {
+                                unpublishInUAT(customer, pipelineName, parentDAGFolder)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Final Step: Send Summary Email
+        stage('Send Summary Email') {
+            steps {
+                script {
+                    def emailAddress = params.EMAIL_ADDRESS
+
+                    if (emailAddress) {
+                        // Use Jenkins Email Extension Plugin or simple mail sending
+                        emailext (
+                            subject: "Pipeline Promotion Summary Report",
+                            body: """
+                            Hello,
+
+                            Here is the summary report for the pipeline promotion process:
+
+                            ${env.SUMMARY_REPORT}
+
+                            Best Regards,
+                            Jenkins
+                            """,
+                            to: emailAddress
+                        )
+                    } else {
+                        echo "No email address provided. Skipping email report."
+                    }
                 }
             }
         }
