@@ -26,7 +26,7 @@ pipeline {
         stage('Generate OAuth Tokens') {
             steps {
                 script {
-                    // Get OAuth token for NPE environment
+                    // Get OAuth token for NPE environment (if flow involves NPE)
                     if (params.PROMOTION_FLOW != 'UAT->PROD') {
                         withCredentials([usernamePassword(credentialsId: 'CLIENT_API_SNAPSHOT', passwordVariable: 'NPE_CLIENT_SECRET', usernameVariable: 'NPE_CLIENT_ID')]) {
                             def npeOauthUrl = "${env.NPE_AUTH_URL}"
@@ -123,7 +123,7 @@ pipeline {
         }
 
         // Wait Stage for NPE->UAT->PROD
-        stage('Wait Between Promotion Steps') {
+        stage('Wait Between NPE and UAT->PROD') {
             when {
                 expression { params.PROMOTION_FLOW == 'NPE->UAT->PROD' }
             }
