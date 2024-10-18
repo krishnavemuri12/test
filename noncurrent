@@ -2,47 +2,67 @@ pipeline {
     agent any
 
     parameters {
-        string(name: 'SOURCE_BUCKET', description: 'Source GCS bucket path')
-        string(name: 'DESTINATION_BUCKET', description: 'Destination GCS bucket path')
+        string(name: 'SOURCE_BUCKET_PATH', defaultValue: '', description: 'Path to the source GCS bucket folder')
+        string(name: 'DESTINATION_BUCKET_PATH', defaultValue: '', description: 'Path to the destination GCS bucket folder where renamed files will be copied')
     }
 
     stages {
-        stage('List and Process Non-Current Versions') {
+        stage('List Non-Current Versions') {
             steps {
                 script {
-                    // List non-current versions
-                    def noncurrentVersions = sh(
-                        script: """
-                            gsutil ls -a -l ${params.SOURCE_BUCKET} | grep -v 'CURRENT' | awk '{print \$3" "\$4" "\$8}'
-                        """,
-                        returnStdout: true
-                    ).trim()
+                    // List all objects (including non-current versions) in the source bucket folder
+                    def filesWithVersions = sh(returnStdout: true, script: """
+                        gsutil ls -a "gs://${params.SOURCE_BUCKET_PATH}"
+                    """).trim().split("\n")
 
-                    // Process each non-current version
-                    noncurrentVersions.split('\n').each { line ->
-                        def (date, time, file) = line.split()
-                        def deletedDate = date.replace('-', '')
-                        def fileName = file.tokenize('/').last()
-                        def newFileName = "${fileName}_${deletedDate}"
-                        
-                        // Copy and rename the file
-                        sh """
-                            gsutil cp ${file} ${params.DESTINATION_BUCKET}/${newFileName}
-                        """
-                        
-                        echo "Processed: ${file} -> ${params.DESTINATION_BUCKET}/${newFileName}"
+                    if (filesWithVersions.isEmpty()) {
+                        error("No files found in the bucket or folder path.")
                     }
+
+                    // Filter to remove the live version (last one for each file group)
+                    def baseFileNames = [:] // Map to group versions by base file name
+
+                    // Group versions by base file name (without #generation_number)
+                    filesWithVersions.each { version ->
+                        def baseFileName = version.split('#')[0] // Extract the base file name
+
+                        if (!baseFileNames.containsKey(baseFileName)) {
+                            baseFileNames[baseFileName] = []
+                        }
+                        baseFileNames[baseFileName].add(version)
+                    }
+
+                    // Remove the last (live) version for each file and keep only the non-current ones
+                    def nonCurrentVersions = []
+                    baseFileNames.each { baseFileName, versions ->
+                        if (versions.size() > 1) {
+                            nonCurrentVersions.addAll(versions[0..-2]) // Add all except the last version
+                        }
+                    }
+
+                    if (nonCurrentVersions.isEmpty()) {
+                        error("No non-current versions found to process.")
+                    }
+
+                    // Log the non-current versions
+                    echo "Non-Current Versions: ${nonCurrentVersions}"
+                    
+                    // Save the non-current versions for the next stage
+                    env.NON_CURRENT_VERSIONS = nonCurrentVersions.join(",")
                 }
             }
         }
-    }
 
-    post {
-        success {
-            echo "Successfully processed non-current versions from ${params.SOURCE_BUCKET} to ${params.DESTINATION_BUCKET}"
-        }
-        failure {
-            echo "Failed to process non-current versions"
-        }
-    }
-}
+        stage('Rename and Copy Archived Versions') {
+            steps {
+                script {
+                    // Convert the saved environment variable back to a list
+                    def nonCurrentVersions = env.NON_CURRENT_VERSIONS.split(',')
+
+                    // Iterate through each non-current version and rename it
+                    def versionCounter = [:] // Counter to track the sequence for each file
+
+                    nonCurrentVersions.each { version ->
+                        def fileName = version.split('/').last().split('#')[0] // Extract base file name
+
+                        // Increment version
