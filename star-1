@@ -1,0 +1,172 @@
+pipeline {
+    agent any
+    parameters {
+        choice(name: 'PROMOTION_FLOW', choices: ['NPE->UAT->PROD', 'NPE->UAT', 'UAT->PROD'], description: 'Select Promotion Flow')
+        booleanParam(name: 'REPUBLISH_BEFORE_PROMOTING', defaultValue: false, description: 'Republish before promoting')
+        booleanParam(name: 'KEEP_PUBLISHED_IN_LOWER_ENV', defaultValue: true, description: 'Keep pipeline published in lower environment after promotion')
+        string(name: 'DAG_PREFIX', defaultValue: 'CAGBPOFLN_', description: 'DAG Prefix')
+        choice(name: 'RETRIES', choices: ['0', '1', '2'], description: 'Number of retries on failure')
+        text(name: 'PIPELINES_TO_PROMOTE', description: 'List of pipelines to promote, one per line', defaultValue: 'dummy-customer/pipeline-name1\ndummy-customer/pipeline-name2')
+    }
+
+    environment {
+        NPE_API = 'https://global-star.alpha.km/config/'
+        UAT_API = 'https://global-star.uat.km/config/'
+        PROD_API = 'https://global-star.prd.km/config/'
+        BUCKET_UAT = 'northamerica-northeast1-ca-gbp-consumer-uat'
+        BUCKET_PROD = 'northamerica-northeast1-ca-gbp-consumer-prd'
+    }
+
+    stages {
+        stage('Setup') {
+            steps {
+                script {
+                    pipelines = params.PIPELINES_TO_PROMOTE.split("\n")
+                    retries = params.RETRIES.toInteger()
+                }
+            }
+        }
+
+        stage('Promotion Process') {
+            steps {
+                script {
+                    pipelines.each { pipeline -> 
+                        handlePromotion(pipeline, params.PROMOTION_FLOW, retries)
+                    }
+                }
+            }
+        }
+
+        stage('Summary Report') {
+            steps {
+                script {
+                    // Send email with a summary report, collect status of all pipelines
+                    sendSummaryReport()
+                }
+            }
+        }
+    }
+}
+
+def handlePromotion(pipeline, promotionFlow, retries) {
+    def customer = pipeline.split('/')[0]
+    def pipelineName = pipeline.split('/')[1]
+    def parentDAGFolder = "${params.DAG_PREFIX}${pipelineName.toUpperCase().replace('-', '_')}"
+
+    retry(retries) {
+        try {
+            if (promotionFlow == 'NPE->UAT->PROD' || promotionFlow == 'NPE->UAT') {
+                promoteToUAT(customer, pipelineName, parentDAGFolder)
+            }
+            if (promotionFlow == 'NPE->UAT->PROD' || promotionFlow == 'UAT->PROD') {
+                promoteToProd(customer, pipelineName, parentDAGFolder)
+            }
+        } catch (Exception e) {
+            echo "Error occurred during promotion: ${e.message}"
+            error("Promotion failed for ${pipelineName}")
+        }
+    }
+}
+
+def promoteToUAT(customer, pipelineName, parentDAGFolder) {
+    if (params.REPUBLISH_BEFORE_PROMOTING) {
+        publishInNPE(customer, pipelineName, parentDAGFolder)
+    }
+
+    unpublishInUAT(customer, pipelineName, parentDAGFolder)
+    promoteFromNPEToUAT(customer, pipelineName, parentDAGFolder)
+    publishInUAT(customer, pipelineName, parentDAGFolder)
+
+    if (!params.KEEP_PUBLISHED_IN_LOWER_ENV) {
+        unpublishInNPE(customer, pipelineName, parentDAGFolder)
+    }
+}
+
+def promoteToProd(customer, pipelineName, parentDAGFolder) {
+    unpublishInProd(customer, pipelineName, parentDAGFolder)
+    promoteFromUATToProd(customer, pipelineName, parentDAGFolder)
+    publishInProd(customer, pipelineName, parentDAGFolder)
+
+    if (!params.KEEP_PUBLISHED_IN_LOWER_ENV) {
+        unpublishInUAT(customer, pipelineName, parentDAGFolder)
+    }
+}
+
+def publishInNPE(customer, pipelineName, parentDAGFolder) {
+    def response = httpRequest url: "${NPE_API}publish", httpMode: 'POST', 
+        requestBody: constructPublishRequestBody(customer, pipelineName, parentDAGFolder)
+    handleApiResponse(response, "Publish NPE")
+}
+
+def publishInUAT(customer, pipelineName, parentDAGFolder) {
+    def response = httpRequest url: "${UAT_API}publish", httpMode: 'POST',
+        requestBody: constructPublishRequestBody(customer, pipelineName, parentDAGFolder)
+    handleApiResponse(response, "Publish UAT")
+}
+
+def publishInProd(customer, pipelineName, parentDAGFolder) {
+    def response = httpRequest url: "${PROD_API}publish", httpMode: 'POST',
+        requestBody: constructPublishRequestBody(customer, pipelineName, parentDAGFolder)
+    handleApiResponse(response, "Publish PROD")
+}
+
+def unpublishInNPE(customer, pipelineName, parentDAGFolder) {
+    def response = httpRequest url: "${NPE_API}unpublish", httpMode: 'POST',
+        requestBody: constructPublishRequestBody(customer, pipelineName, parentDAGFolder)
+    handleApiResponse(response, "Unpublish NPE")
+}
+
+def unpublishInUAT(customer, pipelineName, parentDAGFolder) {
+    def response = httpRequest url: "${UAT_API}unpublish", httpMode: 'POST',
+        requestBody: constructPublishRequestBody(customer, pipelineName, parentDAGFolder)
+    handleApiResponse(response, "Unpublish UAT")
+}
+
+def unpublishInProd(customer, pipelineName, parentDAGFolder) {
+    def response = httpRequest url: "${PROD_API}unpublish", httpMode: 'POST',
+        requestBody: constructPublishRequestBody(customer, pipelineName, parentDAGFolder)
+    handleApiResponse(response, "Unpublish PROD")
+}
+
+def promoteFromNPEToUAT(customer, pipelineName, parentDAGFolder) {
+    def response = httpRequest url: "${NPE_API}promote", httpMode: 'POST',
+        requestBody: constructPromoteRequestBody(customer, pipelineName, parentDAGFolder, env.BUCKET_UAT)
+    handleApiResponse(response, "Promote NPE to UAT")
+}
+
+def promoteFromUATToProd(customer, pipelineName, parentDAGFolder) {
+    def response = httpRequest url: "${UAT_API}promote", httpMode: 'POST',
+        requestBody: constructPromoteRequestBody(customer, pipelineName, parentDAGFolder, env.BUCKET_PROD)
+    handleApiResponse(response, "Promote UAT to PROD")
+}
+
+def constructPublishRequestBody(customer, pipelineName, parentDAGFolder) {
+    return """{
+        "customer": "${customer}",
+        "name": "${pipelineName}",
+        "bu": "ca",
+        "parentDAGFolder": "${parentDAGFolder}"
+    }"""
+}
+
+def constructPromoteRequestBody(customer, pipelineName, parentDAGFolder, bucket) {
+    return """{
+        "customer": "${customer}",
+        "name": "${pipelineName}",
+        "bu": "ca",
+        "parentDAGFolder": "${parentDAGFolder}",
+        "bucket": "${bucket}"
+    }"""
+}
+
+def handleApiResponse(response, step) {
+    if (response.status != 200) {
+        error("API call failed during step ${step}. Response: ${response.content}")
+    }
+}
+
+def sendSummaryReport() {
+    // This is where we generate and send the summary email report
+    // Using pipeline build status and step results
+    echo "Sending summary report to specified emails..."
+}
