@@ -65,4 +65,31 @@ pipeline {
                     nonCurrentVersions.each { version ->
                         def fileName = version.split('/').last().split('#')[0] // Extract base file name
 
-                        // Increment version
+                        // Increment version counter for the file
+                        def count = versionCounter.getOrDefault(fileName, 0) + 1
+                        versionCounter[fileName] = count
+
+                        // Create the new file name
+                        def newFileName = "${fileName.split('\\.')[0]}-${count}.${fileName.split('\\.')[1]}"
+
+                        echo "Renaming archived version: ${fileName} to ${newFileName}"
+
+                        // Copy the renamed file to the destination bucket
+                        sh """
+                            gsutil cp "${version}" "gs://${params.DESTINATION_BUCKET_PATH}/${newFileName}"
+                        """
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Non-current versions renamed and copied to the destination bucket successfully!"
+        }
+        failure {
+            echo "Pipeline failed. Please check the logs."
+        }
+    }
+}
