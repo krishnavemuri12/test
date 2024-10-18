@@ -22,7 +22,6 @@ pipeline {
     }
 
     stages {
-        // Step 1: Generate OAuth Tokens
         stage('Generate OAuth Tokens') {
             steps {
                 script {
@@ -63,77 +62,141 @@ pipeline {
             }
         }
 
-        // Step 2: Promote Pipelines with Retry Logic
-        stage('Promote Pipelines') {
+        stage('Promote Pipelines in Parallel (Steps 1-4)') {
             steps {
                 script {
                     def pipelines = params.PIPELINES_TO_PROMOTE.split("\n")
-                    def retries = params.RETRIES.toInteger()
-                    def summary = []
-
+                    def parallelSteps = [:]
+                    
                     pipelines.each { pipeline ->
-                        def customer = pipeline.split('/')[0]
-                        def pipelineName = pipeline.split('/')[1]
-                        def parentDAGFolder = "${params.DAG_PREFIX}${pipelineName.toUpperCase().replace('-', '_')}"
-                        def pipelineStatus = "Success"
-                        def retryCount = 0
+                        parallelSteps[pipeline] = {
+                            def customer = pipeline.split('/')[0]
+                            def pipelineName = pipeline.split('/')[1]
+                            def parentDAGFolder = "${params.DAG_PREFIX}${pipelineName.toUpperCase().replace('-', '_')}"
+                            def retryCount = 0
 
-                        retry(retries) {
-                            try {
-                                echo "Processing pipeline: ${pipelineName}"
+                            retry(params.RETRIES.toInteger()) {
+                                try {
+                                    echo "Processing pipeline: ${pipelineName}"
 
-                                // Republish before promoting if option enabled
-                                if (params.REPUBLISH_BEFORE_PROMOTING) {
-                                    if (params.PROMOTION_FLOW == 'NPE->UAT' || params.PROMOTION_FLOW == 'NPE->UAT->PROD') {
+                                    // Step 1: Unpublish in NPE (optional)
+                                    if (params.REPUBLISH_BEFORE_PROMOTING && (params.PROMOTION_FLOW == 'NPE->UAT' || params.PROMOTION_FLOW == 'NPE->UAT->PROD')) {
                                         unpublishInNPE(customer, pipelineName, parentDAGFolder)
+                                    }
+
+                                    // Step 2: Publish in NPE (optional)
+                                    if (params.REPUBLISH_BEFORE_PROMOTING && (params.PROMOTION_FLOW == 'NPE->UAT' || params.PROMOTION_FLOW == 'NPE->UAT->PROD')) {
                                         publishInNPE(customer, pipelineName, parentDAGFolder)
                                     }
-                                }
 
-                                // Handle NPE->UAT promotion flow
-                                if (params.PROMOTION_FLOW == 'NPE->UAT' || params.PROMOTION_FLOW == 'NPE->UAT->PROD') {
+                                    // Step 3: Unpublish in UAT
                                     unpublishInUAT(customer, pipelineName, parentDAGFolder)
-                                    promoteNPEToUAT(customer, pipelineName, parentDAGFolder)
-                                    waitForPromotionCompletion("NPE->UAT")
-                                    publishInUAT(customer, pipelineName, parentDAGFolder)
-                                }
 
-                                // Handle UAT->PROD promotion flow
-                                if (params.PROMOTION_FLOW == 'UAT->PROD' || params.PROMOTION_FLOW == 'NPE->UAT->PROD') {
-                                    unpublishInPROD(customer, pipelineName, parentDAGFolder)
-                                    promoteUATToPROD(customer, pipelineName, parentDAGFolder)
-                                    waitForPromotionCompletion("UAT->PROD")
-                                    publishInPROD(customer, pipelineName, parentDAGFolder)
-                                }
-
-                                // Handle unpublishing from lower environment if option B is NOT enabled
-                                if (!params.KEEP_PUBLISHED_IN_LOWER_ENV) {
+                                    // Step 4: Promote NPE->UAT
                                     if (params.PROMOTION_FLOW == 'NPE->UAT' || params.PROMOTION_FLOW == 'NPE->UAT->PROD') {
-                                        unpublishInNPE(customer, pipelineName, parentDAGFolder)
+                                        promoteNPEToUAT(customer, pipelineName, parentDAGFolder)
                                     }
-                                    if (params.PROMOTION_FLOW == 'UAT->PROD' || params.PROMOTION_FLOW == 'NPE->UAT->PROD') {
-                                        unpublishInUAT(customer, pipelineName, parentDAGFolder)
+                                } catch (Exception e) {
+                                    retryCount += 1
+                                    echo "Retry ${retryCount}/${params.RETRIES.toInteger()} for ${pipelineName} failed: ${e}"
+                                    if (retryCount == params.RETRIES.toInteger()) {
+                                        error("Pipeline ${pipelineName} failed after ${retryCount} retries.")
                                     }
-                                }
-                            } catch (Exception e) {
-                                retryCount += 1
-                                echo "Retry ${retryCount}/${retries} for ${pipelineName} due to error: ${e}"
-                                if (retryCount == retries) {
-                                    pipelineStatus = "Failed after ${retryCount} retries"
-                                    throw new Exception("Promotion failed after ${retryCount} retries")
                                 }
                             }
                         }
-                        // Add pipeline status to the summary
-                        summary.add("Pipeline: ${pipelineName}, Status: ${pipelineStatus}, Retries: ${retryCount}")
                     }
-                    // Save summary for the email
-                    env.SUMMARY_REPORT = summary.join("\n")
+                    // Execute all pipelines in parallel for steps 1-4
+                    parallel parallelSteps
                 }
             }
         }
 
-        // Step 3: Send Summary Email
+        // Wait 5 minutes after all NPE->UAT promotion
+        stage('Wait After NPE->UAT Promotion') {
+            steps {
+                script {
+                    echo "Waiting 5 minutes after NPE->UAT promotion for all pipelines..."
+                    sleep(time: 5, unit: 'MINUTES')
+                }
+            }
+        }
+
+        stage('Promote UAT to PROD') {
+            steps {
+                script {
+                    def pipelines = params.PIPELINES_TO_PROMOTE.split("\n")
+                    def parallelSteps = [:]
+                    
+                    pipelines.each { pipeline ->
+                        parallelSteps[pipeline] = {
+                            def customer = pipeline.split('/')[0]
+                            def pipelineName = pipeline.split('/')[1]
+                            def parentDAGFolder = "${params.DAG_PREFIX}${pipelineName.toUpperCase().replace('-', '_')}"
+
+                            retry(params.RETRIES.toInteger()) {
+                                try {
+                                    echo "Processing UAT->PROD for pipeline: ${pipelineName}"
+
+                                    // Step 7: Unpublish in PROD
+                                    unpublishInPROD(customer, pipelineName, parentDAGFolder)
+
+                                    // Step 8: Promote UAT->PROD
+                                    promoteUATToPROD(customer, pipelineName, parentDAGFolder)
+
+                                } catch (Exception e) {
+                                    retryCount += 1
+                                    echo "Retry ${retryCount}/${params.RETRIES.toInteger()} for ${pipelineName} failed: ${e}"
+                                    if (retryCount == params.RETRIES.toInteger()) {
+                                        error("Pipeline ${pipelineName} failed after ${retryCount} retries.")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Execute all pipelines in parallel for steps 7-8
+                    parallel parallelSteps
+                }
+            }
+        }
+
+        // Wait 5 minutes after all UAT->PROD promotion
+        stage('Wait After UAT->PROD Promotion') {
+            steps {
+                script {
+                    echo "Waiting 5 minutes after UAT->PROD promotion for all pipelines..."
+                    sleep(time: 5, unit: 'MINUTES')
+                }
+            }
+        }
+
+        // Step 9: Publish in PROD
+        stage('Publish in PROD') {
+            steps {
+                script {
+                    def pipelines = params.PIPELINES_TO_PROMOTE.split("\n")
+                    def parallelSteps = [:]
+                    
+                    pipelines.each { pipeline ->
+                        parallelSteps[pipeline] = {
+                            def customer = pipeline.split('/')[0]
+                            def pipelineName = pipeline.split('/')[1]
+                            def parentDAGFolder = "${params.DAG_PREFIX}${pipelineName.toUpperCase().replace('-', '_')}"
+                            
+                            publishInPROD(customer, pipelineName, parentDAGFolder)
+
+                            // Optional: Unpublish in UAT (if option B is not enabled)
+                            if (!params.KEEP_PUBLISHED_IN_LOWER_ENV) {
+                                unpublishInUAT(customer, pipelineName, parentDAGFolder)
+                            }
+                        }
+                    }
+                    // Execute all pipelines in parallel for Step 9
+                    parallel parallelSteps
+                }
+            }
+        }
+
         stage('Send Summary Email') {
             steps {
                 script {
@@ -178,12 +241,6 @@ def publishInNPE(customer, pipelineName, parentDAGFolder) {
 
 def unpublishInUAT(customer, pipelineName, parentDAGFolder) {
     def url = "${env.UAT_API}unpublish"
-    def body = """{"customer": "${customer}", "name": "${pipelineName}", "parentDAGFolder": "${parentDAGFolder}", "bu": "ca"}"""
-    sh """curl -X POST '${url}' -H 'Authorization: Bearer ${env.UAT_PROD_TOKEN}' -H 'Content-Type: application/json' -d '${body}' -k"""
-}
-
-def publishInUAT(customer, pipelineName, parentDAGFolder) {
-    def url = "${env.UAT_API}publish"
     def body = """{"customer": "${customer}", "name": "${pipelineName}", "parentDAGFolder": "${parentDAGFolder}", "bu": "ca"}"""
     sh """curl -X POST '${url}' -H 'Authorization: Bearer ${env.UAT_PROD_TOKEN}' -H 'Content-Type: application/json' -d '${body}' -k"""
 }
