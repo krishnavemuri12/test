@@ -2,7 +2,7 @@ pipeline {
     agent any
 
     parameters {
-        choice(name: 'PROMOTION_FLOW', choices: ['NPE->UAT->PROD'], description: 'Select Promotion Flow')
+        choice(name: 'PROMOTION_FLOW', choices: ['NPE->UAT->PROD', 'NPE->UAT', 'UAT->PROD'], description: 'Select Promotion Flow')
         booleanParam(name: 'REPUBLISH_BEFORE_PROMOTING', defaultValue: false, description: 'Republish before promoting')
         booleanParam(name: 'KEEP_PUBLISHED_IN_LOWER_ENV', defaultValue: true, description: 'Keep pipeline published in lower environment after promoting')
         string(name: 'DAG_PREFIX', defaultValue: 'CAGBPOFLN_', description: 'DAG Prefix')
@@ -15,6 +15,8 @@ pipeline {
         NPE_API = 'https://global-star.alpha.km/config/'
         UAT_API = 'https://global-star.uat.km/config/'
         PROD_API = 'https://global-star.prd.km/config/'
+        NPE_AUTH_URL = 'https://ram-ntr-app.npe.pk/oauth2/token'
+        UAT_PROD_AUTH_URL = 'https://ram-ntr-app.uat.pk/oauth2/token'
         BUCKET_UAT = 'northamerica-northeast1-ca-gbp-consumer-uat'
         BUCKET_PROD = 'northamerica-northeast1-ca-gbp-consumer-prd'
     }
@@ -25,18 +27,20 @@ pipeline {
             steps {
                 script {
                     // Get OAuth token for NPE environment
-                    withCredentials([usernamePassword(credentialsId: 'CLIENT_API_SNAPSHOT', passwordVariable: 'NPE_CLIENT_SECRET', usernameVariable: 'NPE_CLIENT_ID')]) {
-                        def npeOauthUrl = "${env.NPE_AUTH_URL}"
-                        def npeRequestBody = "client_id=${env.NPE_CLIENT_ID}&client_secret=${env.NPE_CLIENT_SECRET}&grant_type=client_credentials"
-                        def npeResponse = sh(script: """
-                            curl -s -X POST -H 'Content-Type: application/x-www-form-urlencoded' -d '${npeRequestBody}' ${npeOauthUrl} | jq -r '.access_token'
-                        """, returnStdout: true).trim()
+                    if (params.PROMOTION_FLOW != 'UAT->PROD') {
+                        withCredentials([usernamePassword(credentialsId: 'CLIENT_API_SNAPSHOT', passwordVariable: 'NPE_CLIENT_SECRET', usernameVariable: 'NPE_CLIENT_ID')]) {
+                            def npeOauthUrl = "${env.NPE_AUTH_URL}"
+                            def npeRequestBody = "client_id=${env.NPE_CLIENT_ID}&client_secret=${env.NPE_CLIENT_SECRET}&grant_type=client_credentials"
+                            def npeResponse = sh(script: """
+                                curl -s -X POST -H 'Content-Type: application/x-www-form-urlencoded' -d '${npeRequestBody}' ${npeOauthUrl} | jq -r '.access_token'
+                            """, returnStdout: true).trim()
 
-                        if (npeResponse) {
-                            env.NPE_TOKEN = npeResponse
-                            echo "NPE OAuth Token obtained successfully."
-                        } else {
-                            error("Failed to obtain OAuth token for NPE.")
+                            if (npeResponse) {
+                                env.NPE_TOKEN = npeResponse
+                                echo "NPE OAuth Token obtained successfully."
+                            } else {
+                                error("Failed to obtain OAuth token for NPE.")
+                            }
                         }
                     }
                     
@@ -59,8 +63,8 @@ pipeline {
             }
         }
 
-        // Step 2: Promote Pipelines and Collect Summary (Steps 1-4)
-        stage('Promote Pipelines (Steps 1-4)') {
+        // Step 2: Promote Pipelines Based on Selected Flow
+        stage('Promote Pipelines') {
             steps {
                 script {
                     def pipelines = params.PIPELINES_TO_PROMOTE.split("\n")
@@ -76,24 +80,36 @@ pipeline {
 
                         retry(retries) {
                             try {
-                                if (params.REPUBLISH_BEFORE_PROMOTING) {
-                                    // Step 1: Unpublish in NPE (optional)
-                                    unpublishInNPE(customer, pipelineName, parentDAGFolder)
+                                // Handle NPE->UAT Promotion (if selected)
+                                if (params.PROMOTION_FLOW == 'NPE->UAT' || params.PROMOTION_FLOW == 'NPE->UAT->PROD') {
+                                    if (params.REPUBLISH_BEFORE_PROMOTING) {
+                                        // Step 1: Unpublish in NPE (optional)
+                                        unpublishInNPE(customer, pipelineName, parentDAGFolder)
+                                        
+                                        // Step 2: Publish in NPE (optional)
+                                        publishInNPE(customer, pipelineName, parentDAGFolder)
+                                    }
+
+                                    // Step 3: Unpublish in UAT
+                                    unpublishInUAT(customer, pipelineName, parentDAGFolder)
                                     
-                                    // Step 2: Publish in NPE (optional)
-                                    publishInNPE(customer, pipelineName, parentDAGFolder)
+                                    // Step 4: Promote from NPE to UAT
+                                    promoteNPEToUAT(customer, pipelineName, parentDAGFolder)
                                 }
-                                
-                                // Step 3: Unpublish in UAT
-                                unpublishInUAT(customer, pipelineName, parentDAGFolder)
-                                
-                                // Step 4: Promote from NPE to UAT
-                                promoteNPEToUAT(customer, pipelineName, parentDAGFolder)
+
+                                // Handle UAT->PROD Promotion (if selected)
+                                if (params.PROMOTION_FLOW == 'UAT->PROD' || params.PROMOTION_FLOW == 'NPE->UAT->PROD') {
+                                    // Step 7: Unpublish in PROD
+                                    unpublishInPROD(customer, pipelineName, parentDAGFolder)
+                                    
+                                    // Step 8: Promote from UAT to PROD
+                                    promoteUATToPROD(customer, pipelineName, parentDAGFolder)
+                                }
                             } catch (Exception e) {
                                 retryCount += 1
                                 if (retryCount == retries) {
                                     pipelineStatus = "Failed after ${retryCount} retries"
-                                    break
+                                    throw new Exception("Promotion failed after ${retryCount} retries")
                                 }
                             }
                         }
@@ -106,18 +122,24 @@ pipeline {
             }
         }
 
-        // Step 3: Wait 5 minutes after promoting all pipelines
-        stage('Wait After Promotion to UAT') {
+        // Wait Stage for NPE->UAT->PROD
+        stage('Wait Between Promotion Steps') {
+            when {
+                expression { params.PROMOTION_FLOW == 'NPE->UAT->PROD' }
+            }
             steps {
                 script {
-                    echo "Waiting for 5 minutes after promotion before publishing in UAT..."
+                    echo "Waiting for 5 minutes between NPE->UAT and UAT->PROD promotion..."
                     sleep(time: 5, unit: 'MINUTES')
                 }
             }
         }
 
-        // Step 4: Publish Pipelines in UAT
-        stage('Publish Pipelines in UAT') {
+        // Step 4: Publish Pipelines in UAT (if part of NPE->UAT or NPE->UAT->PROD)
+        stage('Publish in UAT') {
+            when {
+                expression { params.PROMOTION_FLOW == 'NPE->UAT' || params.PROMOTION_FLOW == 'NPE->UAT->PROD' }
+            }
             steps {
                 script {
                     def pipelines = params.PIPELINES_TO_PROMOTE.split("\n")
@@ -140,41 +162,11 @@ pipeline {
             }
         }
 
-        // Step 5: Promote Pipelines from UAT to PROD (Steps 7-8)
-        stage('Promote Pipelines from UAT to PROD') {
-            steps {
-                script {
-                    def pipelines = params.PIPELINES_TO_PROMOTE.split("\n")
-                    
-                    pipelines.each { pipeline ->
-                        def customer = pipeline.split('/')[0]
-                        def pipelineName = pipeline.split('/')[1]
-                        def parentDAGFolder = "${params.DAG_PREFIX}${pipelineName.toUpperCase().replace('-', '_')}"
-                        
-                        retry(params.RETRIES.toInteger()) {
-                            // Step 7: Unpublish in PROD
-                            unpublishInPROD(customer, pipelineName, parentDAGFolder)
-                            
-                            // Step 8: Promote from UAT to PROD
-                            promoteUATToPROD(customer, pipelineName, parentDAGFolder)
-                        }
-                    }
-                }
+        // Step 7: Publish Pipelines in PROD (if part of UAT->PROD or NPE->UAT->PROD)
+        stage('Publish in PROD') {
+            when {
+                expression { params.PROMOTION_FLOW == 'UAT->PROD' || params.PROMOTION_FLOW == 'NPE->UAT->PROD' }
             }
-        }
-
-        // Step 6: Wait 5 minutes after promoting all pipelines to PROD
-        stage('Wait Before Publishing in PROD') {
-            steps {
-                script {
-                    echo "Waiting for 5 minutes after promotion to PROD..."
-                    sleep(time: 5, unit: 'MINUTES')
-                }
-            }
-        }
-
-        // Step 7: Publish Pipelines in PROD
-        stage('Publish Pipelines in PROD') {
             steps {
                 script {
                     def pipelines = params.PIPELINES_TO_PROMOTE.split("\n")
