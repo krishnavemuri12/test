@@ -1,21 +1,23 @@
 pipeline {
     agent any
+
     parameters {
         choice(name: 'PROMOTION_FLOW', choices: ['NPE->UAT->PROD', 'NPE->UAT', 'UAT->PROD'], description: 'Select Promotion Flow')
         booleanParam(name: 'REPUBLISH_BEFORE_PROMOTING', defaultValue: false, description: 'Republish before promoting')
-        booleanParam(name: 'KEEP_PUBLISHED_IN_LOWER_ENV', defaultValue: true, description: 'Keep pipeline published in lower environment after promotion')
+        booleanParam(name: 'KEEP_PUBLISHED_IN_LOWER_ENV', defaultValue: true, description: 'Keep pipeline published in lower environment after promoting')
         string(name: 'DAG_PREFIX', defaultValue: 'CAGBPOFLN_', description: 'DAG Prefix')
         choice(name: 'RETRIES', choices: ['0', '1', '2'], description: 'Number of retries on failure')
         text(name: 'PIPELINES_TO_PROMOTE', description: 'List of pipelines to promote, one per line', defaultValue: 'dummy-customer/pipeline-name1\ndummy-customer/pipeline-name2')
     }
 
     environment {
-        // API URLs for different environments
         NPE_API = 'https://global-star.alpha.km/config/'
         UAT_API = 'https://global-star.uat.km/config/'
         PROD_API = 'https://global-star.prd.km/config/'
         NPE_AUTH_URL = 'https://ram-ntr-app.npe.pk/oauth2/token'
         UAT_PROD_AUTH_URL = 'https://ram-ntr-app.uat.pk/oauth2/token'
+        BUCKET_UAT = 'northamerica-northeast1-ca-gbp-consumer-uat'
+        BUCKET_PROD = 'northamerica-northeast1-ca-gbp-consumer-prd'
     }
 
     stages {
@@ -70,7 +72,6 @@ pipeline {
 
                         retry(retries) {
                             try {
-                                // Call the promotion process based on the selected flow
                                 if (params.PROMOTION_FLOW == 'NPE->UAT->PROD' || params.PROMOTION_FLOW == 'NPE->UAT') {
                                     promoteToUAT(customer, pipelineName, parentDAGFolder)
                                 }
@@ -91,7 +92,7 @@ pipeline {
             steps {
                 script {
                     echo "Promotion process completed successfully."
-                    // Here you could add email sending logic for a summary report if required
+                    // You can add email sending logic for the summary report here
                 }
             }
         }
@@ -99,12 +100,37 @@ pipeline {
 }
 
 def promoteToUAT(customer, pipelineName, parentDAGFolder) {
+    if (params.REPUBLISH_BEFORE_PROMOTING) {
+        // Unpublish in NPE
+        def unpublishUrl = "${env.NPE_API}unpublish"
+        def unpublishBody = """{
+            "customer": "${customer}",
+            "name": "${pipelineName}",
+            "parentDAGFolder": "${parentDAGFolder}",
+            "bu": "ca"
+        }"""
+        sh """curl -X POST '${unpublishUrl}' -H 'Content-Type: application/json' -H 'Authorization: Bearer ${env.NPE_TOKEN}' -d '${unpublishBody}' -k"""
+        echo "Unpublished ${pipelineName} in NPE."
+
+        // Publish in NPE
+        def publishUrl = "${env.NPE_API}publish"
+        def publishBody = """{
+            "customer": "${customer}",
+            "name": "${pipelineName}",
+            "parentDAGFolder": "${parentDAGFolder}",
+            "bu": "ca"
+        }"""
+        sh """curl -X POST '${publishUrl}' -H 'Content-Type: application/json' -H 'Authorization: Bearer ${env.NPE_TOKEN}' -d '${publishBody}' -k"""
+        echo "Published ${pipelineName} in NPE."
+    }
+
     // Unpublish in UAT
     def unpublishUrl = "${env.UAT_API}unpublish"
     def unpublishBody = """{
         "customer": "${customer}",
         "name": "${pipelineName}",
-        "parentDAGFolder": "${parentDAGFolder}"
+        "parentDAGFolder": "${parentDAGFolder}",
+        "bu": "ca"
     }"""
     sh """curl -X POST '${unpublishUrl}' -H 'Content-Type: application/json' -H 'Authorization: Bearer ${env.UAT_PROD_TOKEN}' -d '${unpublishBody}' -k"""
     echo "Unpublished ${pipelineName} in UAT."
@@ -114,7 +140,9 @@ def promoteToUAT(customer, pipelineName, parentDAGFolder) {
     def promoteBody = """{
         "customer": "${customer}",
         "name": "${pipelineName}",
-        "parentDAGFolder": "${parentDAGFolder}"
+        "parentDAGFolder": "${parentDAGFolder}",
+        "bucket": "${env.BUCKET_UAT}",
+        "bu": "ca"
     }"""
     sh """curl -X POST '${promoteUrl}' -H 'Content-Type: application/json' -H 'Authorization: Bearer ${env.NPE_TOKEN}' -d '${promoteBody}' -k"""
     echo "Promoted ${pipelineName} from NPE to UAT."
@@ -124,10 +152,24 @@ def promoteToUAT(customer, pipelineName, parentDAGFolder) {
     def publishBody = """{
         "customer": "${customer}",
         "name": "${pipelineName}",
-        "parentDAGFolder": "${parentDAGFolder}"
+        "parentDAGFolder": "${parentDAGFolder}",
+        "bu": "ca"
     }"""
     sh """curl -X POST '${publishUrl}' -H 'Content-Type: application/json' -H 'Authorization: Bearer ${env.UAT_PROD_TOKEN}' -d '${publishBody}' -k"""
     echo "Published ${pipelineName} in UAT."
+
+    if (!params.KEEP_PUBLISHED_IN_LOWER_ENV) {
+        // Unpublish in NPE after promotion
+        def unpublishInNpeUrl = "${env.NPE_API}unpublish"
+        def unpublishInNpeBody = """{
+            "customer": "${customer}",
+            "name": "${pipelineName}",
+            "parentDAGFolder": "${parentDAGFolder}",
+            "bu": "ca"
+        }"""
+        sh """curl -X POST '${unpublishInNpeUrl}' -H 'Content-Type: application/json' -H 'Authorization: Bearer ${env.NPE_TOKEN}' -d '${unpublishInNpeBody}' -k"""
+        echo "Unpublished ${pipelineName} in NPE after promotion."
+    }
 }
 
 def promoteToProd(customer, pipelineName, parentDAGFolder) {
@@ -136,7 +178,8 @@ def promoteToProd(customer, pipelineName, parentDAGFolder) {
     def unpublishBody = """{
         "customer": "${customer}",
         "name": "${pipelineName}",
-        "parentDAGFolder": "${parentDAGFolder}"
+        "parentDAGFolder": "${parentDAGFolder}",
+        "bu": "ca"
     }"""
     sh """curl -X POST '${unpublishUrl}' -H 'Content-Type: application/json' -H 'Authorization: Bearer ${env.UAT_PROD_TOKEN}' -d '${unpublishBody}' -k"""
     echo "Unpublished ${pipelineName} in PROD."
@@ -146,7 +189,9 @@ def promoteToProd(customer, pipelineName, parentDAGFolder) {
     def promoteBody = """{
         "customer": "${customer}",
         "name": "${pipelineName}",
-        "parentDAGFolder": "${parentDAGFolder}"
+        "parentDAGFolder": "${parentDAGFolder}",
+        "bucket": "${env.BUCKET_PROD}",
+        "bu": "ca"
     }"""
     sh """curl -X POST '${promoteUrl}' -H 'Content-Type: application/json' -H 'Authorization: Bearer ${env.UAT_PROD_TOKEN}' -d '${promoteBody}' -k"""
     echo "Promoted ${pipelineName} from UAT to PROD."
@@ -156,8 +201,22 @@ def promoteToProd(customer, pipelineName, parentDAGFolder) {
     def publishBody = """{
         "customer": "${customer}",
         "name": "${pipelineName}",
-        "parentDAGFolder": "${parentDAGFolder}"
+        "parentDAGFolder": "${parentDAGFolder}",
+        "bu": "ca"
     }"""
     sh """curl -X POST '${publishUrl}' -H 'Content-Type: application/json' -H 'Authorization: Bearer ${env.UAT_PROD_TOKEN}' -d '${publishBody}' -k"""
     echo "Published ${pipelineName} in PROD."
+
+    if (!params.KEEP_PUBLISHED_IN_LOWER_ENV) {
+        // Unpublish in UAT after promotion
+        def unpublishInUatUrl = "${env.UAT_API}unpublish"
+        def unpublishInUatBody = """{
+            "customer": "${customer}",
+            "name": "${pipelineName}",
+            "parentDAGFolder": "${parentDAGFolder}",
+            "bu": "ca"
+        }"""
+        sh """curl -X POST '${unpublishInUatUrl}' -H 'Content-Type: application/json' -H 'Authorization: Bearer ${env.UAT_PROD_TOKEN}' -d '${unpublishInUatBody}' -k"""
+        echo "Unpublished ${pipelineName} in UAT after promotion."
+    }
 }
