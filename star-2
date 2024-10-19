@@ -61,6 +61,11 @@ pipeline {
                         }
                     }
                 }
+                // Wait for 5 seconds after generating OAuth tokens
+                sh """
+                    echo "Waiting 5 seconds after generating OAuth tokens..."
+                    sleep 5
+                """
             }
         }
 
@@ -76,7 +81,6 @@ pipeline {
                             executeUATtoPROD()
                         }
                     } catch (Exception e) {
-                        // Capture the error and break the pipeline
                         env.ERROR_MESSAGE = e.message
                         error("Pipeline failed: ${env.ERROR_MESSAGE}")
                     }
@@ -132,13 +136,11 @@ def executeNPEtoUATtoPROD() {
         try {
             echo "Processing NPE->UAT->PROD for pipeline: ${pipelineName}"
 
-            // Step 1: Unpublish in NPE (optional)
             if (params.REPUBLISH_BEFORE_PROMOTING) {
                 unpublishInNPE(customer, pipelineName, parentDAGFolder)
                 sleep(5)
             }
 
-            // Step 2: Publish in NPE (optional, BREAK on failure)
             if (params.REPUBLISH_BEFORE_PROMOTING) {
                 retry(params.RETRIES.toInteger()) {
                     publishInNPE(customer, pipelineName, parentDAGFolder)
@@ -146,7 +148,6 @@ def executeNPEtoUATtoPROD() {
                 sleep(5)
             }
 
-            // Step 3: Unpublish in UAT
             unpublishInUATWithValidationPrefix(customer, pipelineName)
             sleep(5)
 
@@ -156,7 +157,7 @@ def executeNPEtoUATtoPROD() {
         }
     }
 
-    // Step 4: Promote NPE->UAT sequentially for all pipelines, then wait 5 minutes
+    // Step 4: Promote NPE->UAT for all pipelines, then wait 5 minutes
     pipelines.each { pipeline ->
         def customer = pipeline.split('/')[0]
         def pipelineName = pipeline.split('/')[1]
@@ -179,28 +180,84 @@ def executeNPEtoUATtoPROD() {
     echo "Waiting 5 minutes after NPE->UAT promotion..."
     sleep(time: 5, unit: 'MINUTES')
 
-    // Step 5 and Step 6
+    // Step 5 to 7 sequential for each pipeline
     pipelines.each { pipeline ->
         def customer = pipeline.split('/')[0]
         def pipelineName = pipeline.split('/')[1]
         def parentDAGFolder = "${params.DAG_PREFIX}${pipelineName.toUpperCase().replace('-', '_')}"
 
         try {
-            // Step 5: Publish in UAT (BREAK on failure)
+            // Step 5: Publish in UAT
             retry(params.RETRIES.toInteger()) {
                 publishInUATWithValidationPrefix(customer, pipelineName)
             }
+            sleep(5)
 
-            // Step 6: Unpublish in NPE (optional)
+            // Step 6: Optional Unpublish in NPE
             if (!params.KEEP_PUBLISHED_IN_LOWER_ENV) {
                 unpublishInNPE(customer, pipelineName, parentDAGFolder)
             }
+            sleep(5)
 
-            summary << "${pipelineName} - Steps 5-6 (Publish in UAT and Unpublish in NPE) completed successfully."
+            // Step 7: Unpublish in PROD
+            unpublishInPROD(customer, pipelineName, parentDAGFolder)
+            sleep(5)
+
+            summary << "${pipelineName} - Steps 5-7 completed successfully."
 
         } catch (Exception e) {
-            summary << "${pipelineName} - Failed during Steps 5-6 (Publish in UAT and Unpublish in NPE): ${e.message}"
-            error("Breaking after failure in Steps 5-6")
+            summary << "${pipelineName} - Failed during Steps 5-7: ${e.message}"
+            error("Breaking after failure in Steps 5-7")
+        }
+    }
+
+    env.SUMMARY_REPORT += "\n" + summary.join("\n")
+
+    // Step 8: Promote UAT->PROD for all pipelines, then wait 5 minutes
+    pipelines.each { pipeline ->
+        def customer = pipeline.split('/')[0]
+        def pipelineName = pipeline.split('/')[1]
+        def parentDAGFolder = "${params.DAG_PREFIX}${pipelineName.toUpperCase().replace('-', '_')}"
+
+        try {
+            retry(params.RETRIES.toInteger()) {
+                promoteUATtoPROD(customer, pipelineName, parentDAGFolder)
+            }
+            summary << "${pipelineName} - Step 8 (Promote UAT->PROD) completed successfully."
+
+        } catch (Exception e) {
+            summary << "${pipelineName} - Failed during Step 8 (Promote UAT->PROD): ${e.message}"
+            error("Breaking after failure in Step 8 (Promote UAT->PROD)")
+        }
+    }
+
+    env.SUMMARY_REPORT += "\n" + summary.join("\n")
+
+    echo "Waiting 5 minutes after UAT->PROD promotion..."
+    sleep(time: 5, unit: 'MINUTES')
+
+    // Step 9 and Step 10: Publish in PROD and Optional Unpublish in UAT
+    pipelines.each { pipeline ->
+        def customer = pipeline.split('/')[0]
+        def pipelineName = pipeline.split('/')[1]
+        def parentDAGFolder = "${params.DAG_PREFIX}${pipelineName.toUpperCase().replace('-', '_')}"
+
+        try {
+            // Step 9: Publish in PROD
+            retry(params.RETRIES.toInteger()) {
+                publishInPROD(customer, pipelineName, parentDAGFolder)
+            }
+
+            // Step 10: Optional Unpublish in UAT
+            if (!params.KEEP_PUBLISHED_IN_LOWER_ENV) {
+                unpublishInUATWithValidationPrefix(customer, pipelineName)
+            }
+
+            summary << "${pipelineName} - Steps 9-10 completed successfully."
+
+        } catch (Exception e) {
+            summary << "${pipelineName} - Failed during Steps 9-10: ${e.message}"
+            error("Breaking after failure in Steps 9-10")
         }
     }
 
@@ -221,13 +278,11 @@ def executeNPEtoUAT() {
         try {
             echo "Processing NPE->UAT for pipeline: ${pipelineName}"
 
-            // Step 1: Unpublish in NPE (optional)
             if (params.REPUBLISH_BEFORE_PROMOTING) {
                 unpublishInNPE(customer, pipelineName, parentDAGFolder)
                 sleep(5)
             }
 
-            // Step 2: Publish in NPE (optional, BREAK on failure)
             if (params.REPUBLISH_BEFORE_PROMOTING) {
                 retry(params.RETRIES.toInteger()) {
                     publishInNPE(customer, pipelineName, parentDAGFolder)
@@ -235,7 +290,6 @@ def executeNPEtoUAT() {
                 sleep(5)
             }
 
-            // Step 3: Unpublish in UAT (proceed regardless of status)
             unpublishInUATWithValidationPrefix(customer, pipelineName)
             sleep(5)
 
@@ -245,7 +299,7 @@ def executeNPEtoUAT() {
         }
     }
 
-    // Step 4: Promote NPE->UAT sequentially for all pipelines, then wait 5 minutes
+    // Step 4: Promote NPE->UAT for all pipelines, then wait 5 minutes
     pipelines.each { pipeline ->
         def customer = pipeline.split('/')[0]
         def pipelineName = pipeline.split('/')[1]
@@ -275,7 +329,11 @@ def executeNPEtoUAT() {
         def parentDAGFolder = "${params.DAG_PREFIX}${pipelineName.toUpperCase().replace('-', '_')}"
 
         try {
-            // Step 5: Optional Unpublish in NPE
+            // Step 5: Publish in UAT
+            retry(params.RETRIES.toInteger()) {
+                publishInUATWithValidationPrefix(customer, pipelineName)
+            }
+            // Step 6: Optional Unpublish in NPE
             if (!params.KEEP_PUBLISHED_IN_LOWER_ENV) {
                 unpublishInNPE(customer, pipelineName, parentDAGFolder)
             }
@@ -305,13 +363,11 @@ def executeUATtoPROD() {
         try {
             echo "Processing UAT->PROD for pipeline: ${pipelineName}"
 
-            // Step 1: Unpublish in UAT (optional)
             if (params.REPUBLISH_BEFORE_PROMOTING) {
                 unpublishInUATWithValidationPrefix(customer, pipelineName)
                 sleep(5)
             }
 
-            // Step 2: Publish in UAT (optional, BREAK on failure)
             if (params.REPUBLISH_BEFORE_PROMOTING) {
                 retry(params.RETRIES.toInteger()) {
                     publishInUATWithValidationPrefix(customer, pipelineName)
@@ -319,7 +375,6 @@ def executeUATtoPROD() {
                 sleep(5)
             }
 
-            // Step 3: Unpublish in PROD (proceed regardless of status)
             unpublishInPROD(customer, pipelineName, parentDAGFolder)
             sleep(5)
 
@@ -331,7 +386,7 @@ def executeUATtoPROD() {
 
     env.SUMMARY_REPORT = summary.join("\n")
 
-    // Step 4: Promote UAT->PROD sequentially for all pipelines, then wait 5 minutes
+    // Step 4: Promote UAT->PROD for all pipelines, then wait 5 minutes
     pipelines.each { pipeline ->
         def customer = pipeline.split('/')[0]
         def pipelineName = pipeline.split('/')[1]
@@ -361,17 +416,17 @@ def executeUATtoPROD() {
         def parentDAGFolder = "${params.DAG_PREFIX}${pipelineName.toUpperCase().replace('-', '_')}"
 
         try {
-            // Step 5: Publish in PROD (BREAK on failure)
+            // Step 5: Publish in PROD
             retry(params.RETRIES.toInteger()) {
                 publishInPROD(customer, pipelineName, parentDAGFolder)
             }
 
-            // Step 6: Optional Unpublish in UAT (if checkbox B is NOT enabled)
+            // Step 6: Optional Unpublish in UAT
             if (!params.KEEP_PUBLISHED_IN_LOWER_ENV) {
                 unpublishInUATWithValidationPrefix(customer, pipelineName)
             }
 
-            summary << "${pipelineName} - Steps 5-6 (Publish in PROD and Unpublish in UAT) completed successfully."
+            summary << "${pipelineName} - Steps 5-6 completed successfully."
 
         } catch (Exception e) {
             summary << "${pipelineName} - Failed during Steps 5-6: ${e.message}"
