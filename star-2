@@ -27,11 +27,8 @@ pipeline {
         stage('Generate OAuth Tokens') {
             steps {
                 script {
-                    echo "Starting OAuth token generation..."
-
                     // Generate OAuth token for NPE if needed
                     if (params.PROMOTION_FLOW != 'UAT->PROD') {
-                        echo "Generating OAuth token for NPE..."
                         withCredentials([usernamePassword(credentialsId: 'CLIENT_API_SNAPSHOT', passwordVariable: 'NPE_CLIENT_SECRET', usernameVariable: 'NPE_CLIENT_ID')]) {
                             def npeOauthUrl = "${env.NPE_AUTH_URL}"
                             def npeRequestBody = "client_id=${env.NPE_CLIENT_ID}&client_secret=${env.NPE_CLIENT_SECRET}&grant_type=client_credentials"
@@ -49,7 +46,6 @@ pipeline {
                     }
 
                     // Generate OAuth token for UAT/PROD
-                    echo "Generating OAuth token for UAT/PROD..."
                     withCredentials([usernamePassword(credentialsId: 'GBP-OUTBOUND-PROD', passwordVariable: 'CLIENT_SECRET', usernameVariable: 'CLIENT_ID')]) {
                         def uatProdOauthUrl = "${env.UAT_PROD_AUTH_URL}"
                         def uatProdRequestBody = "client_id=${env.CLIENT_ID}&client_secret=${env.CLIENT_SECRET}&grant_type=client_credentials"
@@ -64,8 +60,6 @@ pipeline {
                             error("Failed to obtain OAuth token for UAT/PROD.")
                         }
                     }
-
-                    echo "OAuth token generation completed."
                 }
             }
         }
@@ -155,7 +149,7 @@ def executeNPEtoUATtoPROD() {
             unpublishInUATWithValidationPrefix(customer, pipelineName)
             sleep(5)
 
-            // Step 4: Promote NPE->UAT
+            // Step 4: Promote NPE->UAT (BREAK on failure)
             retry(params.RETRIES.toInteger()) {
                 promoteNPEtoUAT(customer, pipelineName, parentDAGFolder)
             }
@@ -175,14 +169,14 @@ def executeNPEtoUATtoPROD() {
             // Step 7: Unpublish in PROD
             unpublishInPROD(customer, pipelineName, parentDAGFolder)
 
-            // Step 8: Promote UAT->PROD
+            // Step 8: Promote UAT->PROD (BREAK on failure)
             retry(params.RETRIES.toInteger()) {
                 promoteUATtoPROD(customer, pipelineName, parentDAGFolder)
             }
 
             sleep(time: 5, unit: 'MINUTES')
 
-            // Step 9: Publish in PROD
+            // Step 9: Publish in PROD (BREAK on failure)
             retry(params.RETRIES.toInteger()) {
                 publishInPROD(customer, pipelineName, parentDAGFolder)
             }
@@ -234,7 +228,7 @@ def executeNPEtoUAT() {
             unpublishInUATWithValidationPrefix(customer, pipelineName)
             sleep(5)
 
-            // Step 4: Promote NPE->UAT
+            // Step 4: Promote NPE->UAT (BREAK on failure)
             retry(params.RETRIES.toInteger()) {
                 promoteNPEtoUAT(customer, pipelineName, parentDAGFolder)
             }
@@ -350,4 +344,56 @@ def executeUATtoPROD() {
     }
 
     env.SUMMARY_REPORT += "\n" + summary.join("\n")
+}
+
+// Helper Functions
+
+def unpublishInNPE(customer, pipelineName, parentDAGFolder) {
+    def url = "${env.NPE_API}unpublish"
+    def body = """{"customer": "${customer}", "name": "${pipelineName}", "parentDAGFolder": "${parentDAGFolder}", "bu": "ca"}"""
+    sh """curl -X POST '${url}' -H 'Authorization: Bearer ${env.NPE_TOKEN}' -H 'Content-Type: application/json' -d '${body}' -k"""
+}
+
+def publishInNPE(customer, pipelineName, parentDAGFolder) {
+    def url = "${env.NPE_API}publish"
+    def body = """{"customer": "${customer}", "name": "${pipelineName}", "parentDAGFolder": "${parentDAGFolder}", "bu": "ca"}"""
+    sh """curl -X POST '${url}' -H 'Authorization: Bearer ${env.NPE_TOKEN}' -H 'Content-Type: application/json' -d '${body}' -k"""
+}
+
+def unpublishInUATWithValidationPrefix(customer, pipelineName) {
+    def url = "${env.UAT_API}unpublish"
+    def parentDAGFolder = "VALIDATION_${pipelineName.toUpperCase().replace('-', '_')}"
+    def body = """{"customer": "${customer}", "name": "${pipelineName}", "parentDAGFolder": "${parentDAGFolder}", "bu": "ca"}"""
+    sh """curl -X POST '${url}' -H 'Authorization: Bearer ${env.UAT_PROD_TOKEN}' -H 'Content-Type: application/json' -d '${body}' -k"""
+}
+
+def publishInUATWithValidationPrefix(customer, pipelineName) {
+    def url = "${env.UAT_API}publish"
+    def parentDAGFolder = "VALIDATION_${pipelineName.toUpperCase().replace('-', '_')}"
+    def body = """{"customer": "${customer}", "name": "${pipelineName}", "parentDAGFolder": "${parentDAGFolder}", "bu": "ca"}"""
+    sh """curl -X POST '${url}' -H 'Authorization: Bearer ${env.UAT_PROD_TOKEN}' -H 'Content-Type: application/json' -d '${body}' -k"""
+}
+
+def promoteNPEtoUAT(customer, pipelineName, parentDAGFolder) {
+    def url = "${env.NPE_TO_UAT_PROMOTE_URL}"
+    def body = """{"customer": "${customer}", "name": "${pipelineName}", "parentDAGFolder": "${parentDAGFolder}", "bucket": "${env.BUCKET_UAT}", "bu": "ca"}"""
+    sh """curl -X POST '${url}' -H 'Authorization: Bearer ${env.NPE_TOKEN}' -H 'Content-Type: application/json' -d '${body}' -k"""
+}
+
+def promoteUATtoPROD(customer, pipelineName, parentDAGFolder) {
+    def url = "${env.UAT_TO_PROD_PROMOTE_URL}"
+    def body = """{"customer": "${customer}", "name": "${pipelineName}", "parentDAGFolder": "${parentDAGFolder}", "bucket": "${env.BUCKET_PROD}", "bu": "ca"}"""
+    sh """curl -X POST '${url}' -H 'Authorization: Bearer ${env.UAT_PROD_TOKEN}' -H 'Content-Type: application/json' -d '${body}' -k"""
+}
+
+def publishInPROD(customer, pipelineName, parentDAGFolder) {
+    def url = "${env.PROD_API}publish"
+    def body = """{"customer": "${customer}", "name": "${pipelineName}", "parentDAGFolder": "${parentDAGFolder}", "bu": "ca"}"""
+    sh """curl -X POST '${url}' -H 'Authorization: Bearer ${env.UAT_PROD_TOKEN}' -H 'Content-Type: application/json' -d '${body}' -k"""
+}
+
+def unpublishInPROD(customer, pipelineName, parentDAGFolder) {
+    def url = "${env.PROD_API}unpublish"
+    def body = """{"customer": "${customer}", "name": "${pipelineName}", "parentDAGFolder": "${parentDAGFolder}", "bu": "ca"}"""
+    sh """curl -X POST '${url}' -H 'Authorization: Bearer ${env.UAT_PROD_TOKEN}' -H 'Content-Type: application/json' -d '${body}' -k"""
 }
