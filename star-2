@@ -139,6 +139,7 @@ def executeNPEtoUATtoPROD() {
             if (params.REPUBLISH_BEFORE_PROMOTING) {
                 unpublishInNPE(customer, pipelineName, parentDAGFolder)
                 sleep(5)
+                summary << "${pipelineName} - Unpublish NPE: Completed successfully."
             }
 
             if (params.REPUBLISH_BEFORE_PROMOTING) {
@@ -146,14 +147,18 @@ def executeNPEtoUATtoPROD() {
                     publishInNPE(customer, pipelineName, parentDAGFolder)
                 }
                 sleep(5)
+                summary << "${pipelineName} - Publish NPE: Completed successfully."
             }
 
-            unpublishInUATWithValidationPrefix(customer, pipelineName)
+            retry(params.RETRIES.toInteger()) {
+                unpublishInUATWithValidationPrefix(customer, pipelineName)
+            }
             sleep(5)
+            summary << "${pipelineName} - Unpublish UAT: Completed successfully."
 
         } catch (Exception e) {
-            summary << "${pipelineName} - Failed during Steps 1-3 (NPE->UAT->PROD): ${e.message}"
-            error("Breaking after failure in Steps 1-3 (NPE->UAT->PROD)")
+            summary << "${pipelineName} - Unpublish NPE/UAT: Failed (${e.message})"
+            error("Breaking after failure in Steps (Unpublish NPE/UAT)")
         }
     }
 
@@ -167,10 +172,10 @@ def executeNPEtoUATtoPROD() {
             retry(params.RETRIES.toInteger()) {
                 promoteNPEtoUAT(customer, pipelineName, parentDAGFolder)
             }
-            summary << "${pipelineName} - Step 4 (Promote NPE->UAT) completed successfully."
+            summary << "${pipelineName} - Promote NPE->UAT: Completed successfully."
 
         } catch (Exception e) {
-            summary << "${pipelineName} - Failed during Step 4 (Promote NPE->UAT): ${e.message}"
+            summary << "${pipelineName} - Promote NPE->UAT: Failed (${e.message})"
             error("Breaking after failure in Step 4 (Promote NPE->UAT)")
         }
     }
@@ -192,22 +197,23 @@ def executeNPEtoUATtoPROD() {
                 publishInUATWithValidationPrefix(customer, pipelineName)
             }
             sleep(5)
+            summary << "${pipelineName} - Publish UAT: Completed successfully."
 
             // Step 6: Optional Unpublish in NPE
             if (!params.KEEP_PUBLISHED_IN_LOWER_ENV) {
                 unpublishInNPE(customer, pipelineName, parentDAGFolder)
+                summary << "${pipelineName} - Unpublish NPE: Completed successfully."
             }
             sleep(5)
 
             // Step 7: Unpublish in PROD
             unpublishInPROD(customer, pipelineName, parentDAGFolder)
             sleep(5)
-
-            summary << "${pipelineName} - Steps 5-7 completed successfully."
+            summary << "${pipelineName} - Unpublish PROD: Completed successfully."
 
         } catch (Exception e) {
-            summary << "${pipelineName} - Failed during Steps 5-7: ${e.message}"
-            error("Breaking after failure in Steps 5-7")
+            summary << "${pipelineName} - Failed during (Publish UAT/Unpublish PROD): ${e.message}"
+            error("Breaking after failure in Steps (Publish UAT/Unpublish PROD)")
         }
     }
 
@@ -223,10 +229,10 @@ def executeNPEtoUATtoPROD() {
             retry(params.RETRIES.toInteger()) {
                 promoteUATtoPROD(customer, pipelineName, parentDAGFolder)
             }
-            summary << "${pipelineName} - Step 8 (Promote UAT->PROD) completed successfully."
+            summary << "${pipelineName} - Promote UAT->PROD: Completed successfully."
 
         } catch (Exception e) {
-            summary << "${pipelineName} - Failed during Step 8 (Promote UAT->PROD): ${e.message}"
+            summary << "${pipelineName} - Promote UAT->PROD: Failed (${e.message})"
             error("Breaking after failure in Step 8 (Promote UAT->PROD)")
         }
     }
@@ -247,17 +253,17 @@ def executeNPEtoUATtoPROD() {
             retry(params.RETRIES.toInteger()) {
                 publishInPROD(customer, pipelineName, parentDAGFolder)
             }
+            summary << "${pipelineName} - Publish PROD: Completed successfully."
 
             // Step 10: Optional Unpublish in UAT
             if (!params.KEEP_PUBLISHED_IN_LOWER_ENV) {
                 unpublishInUATWithValidationPrefix(customer, pipelineName)
+                summary << "${pipelineName} - Unpublish UAT: Completed successfully."
             }
 
-            summary << "${pipelineName} - Steps 9-10 completed successfully."
-
         } catch (Exception e) {
-            summary << "${pipelineName} - Failed during Steps 9-10: ${e.message}"
-            error("Breaking after failure in Steps 9-10")
+            summary << "${pipelineName} - Failed during (Publish PROD/Unpublish UAT): ${e.message}"
+            error("Breaking after failure in Steps (Publish PROD/Unpublish UAT)")
         }
     }
 
@@ -281,6 +287,7 @@ def executeNPEtoUAT() {
             if (params.REPUBLISH_BEFORE_PROMOTING) {
                 unpublishInNPE(customer, pipelineName, parentDAGFolder)
                 sleep(5)
+                summary << "${pipelineName} - Unpublish NPE: Completed successfully."
             }
 
             if (params.REPUBLISH_BEFORE_PROMOTING) {
@@ -288,14 +295,18 @@ def executeNPEtoUAT() {
                     publishInNPE(customer, pipelineName, parentDAGFolder)
                 }
                 sleep(5)
+                summary << "${pipelineName} - Publish NPE: Completed successfully."
             }
 
-            unpublishInUATWithValidationPrefix(customer, pipelineName)
+            retry(params.RETRIES.toInteger()) {
+                unpublishInUATWithValidationPrefix(customer, pipelineName)
+            }
             sleep(5)
+            summary << "${pipelineName} - Unpublish UAT: Completed successfully."
 
         } catch (Exception e) {
-            summary << "${pipelineName} - Failed during Steps 1-3 (NPE->UAT): ${e.message}"
-            error("Breaking after failure in Steps 1-3 (NPE->UAT)")
+            summary << "${pipelineName} - Unpublish NPE/UAT: Failed (${e.message})"
+            error("Breaking after failure in Steps (Unpublish NPE/UAT)")
         }
     }
 
@@ -309,10 +320,10 @@ def executeNPEtoUAT() {
             retry(params.RETRIES.toInteger()) {
                 promoteNPEtoUAT(customer, pipelineName, parentDAGFolder)
             }
-            summary << "${pipelineName} - Step 4 (Promote NPE->UAT) completed successfully."
+            summary << "${pipelineName} - Promote NPE->UAT: Completed successfully."
 
         } catch (Exception e) {
-            summary << "${pipelineName} - Failed during Step 4 (Promote NPE->UAT): ${e.message}"
+            summary << "${pipelineName} - Promote NPE->UAT: Failed (${e.message})"
             error("Breaking after failure in Step 4 (Promote NPE->UAT)")
         }
     }
@@ -322,7 +333,7 @@ def executeNPEtoUAT() {
     echo "Waiting 5 minutes after NPE->UAT promotion..."
     sleep(time: 5, unit: 'MINUTES')
 
-    // Step 5: Optional Unpublish in NPE
+    // Step 5 and Step 6: Publish in UAT and Optional Unpublish in NPE
     pipelines.each { pipeline ->
         def customer = pipeline.split('/')[0]
         def pipelineName = pipeline.split('/')[1]
@@ -333,16 +344,17 @@ def executeNPEtoUAT() {
             retry(params.RETRIES.toInteger()) {
                 publishInUATWithValidationPrefix(customer, pipelineName)
             }
+            summary << "${pipelineName} - Publish UAT: Completed successfully."
+
             // Step 6: Optional Unpublish in NPE
             if (!params.KEEP_PUBLISHED_IN_LOWER_ENV) {
                 unpublishInNPE(customer, pipelineName, parentDAGFolder)
+                summary << "${pipelineName} - Unpublish NPE: Completed successfully."
             }
 
-            summary << "${pipelineName} - NPE->UAT promotion completed successfully."
-
         } catch (Exception e) {
-            summary << "${pipelineName} - Failed during NPE->UAT promotion: ${e.message}"
-            error("Breaking after failure in NPE->UAT promotion")
+            summary << "${pipelineName} - Failed during (Publish UAT/Unpublish NPE): ${e.message}"
+            error("Breaking after failure in Steps (Publish UAT/Unpublish NPE)")
         }
     }
 
@@ -366,6 +378,7 @@ def executeUATtoPROD() {
             if (params.REPUBLISH_BEFORE_PROMOTING) {
                 unpublishInUATWithValidationPrefix(customer, pipelineName)
                 sleep(5)
+                summary << "${pipelineName} - Unpublish UAT: Completed successfully."
             }
 
             if (params.REPUBLISH_BEFORE_PROMOTING) {
@@ -373,14 +386,16 @@ def executeUATtoPROD() {
                     publishInUATWithValidationPrefix(customer, pipelineName)
                 }
                 sleep(5)
+                summary << "${pipelineName} - Publish UAT: Completed successfully."
             }
 
             unpublishInPROD(customer, pipelineName, parentDAGFolder)
             sleep(5)
+            summary << "${pipelineName} - Unpublish PROD: Completed successfully."
 
         } catch (Exception e) {
-            summary << "${pipelineName} - Failed during Steps 1-3 (UAT->PROD): ${e.message}"
-            error("Breaking after failure in Steps 1-3 (UAT->PROD)")
+            summary << "${pipelineName} - Unpublish UAT/PROD: Failed (${e.message})"
+            error("Breaking after failure in Steps (Unpublish UAT/PROD)")
         }
     }
 
@@ -396,10 +411,10 @@ def executeUATtoPROD() {
             retry(params.RETRIES.toInteger()) {
                 promoteUATtoPROD(customer, pipelineName, parentDAGFolder)
             }
-            summary << "${pipelineName} - Step 4 (Promote UAT->PROD) completed successfully."
+            summary << "${pipelineName} - Promote UAT->PROD: Completed successfully."
 
         } catch (Exception e) {
-            summary << "${pipelineName} - Failed during Step 4 (Promote UAT->PROD): ${e.message}"
+            summary << "${pipelineName} - Promote UAT->PROD: Failed (${e.message})"
             error("Breaking after failure in Step 4 (Promote UAT->PROD)")
         }
     }
@@ -420,25 +435,24 @@ def executeUATtoPROD() {
             retry(params.RETRIES.toInteger()) {
                 publishInPROD(customer, pipelineName, parentDAGFolder)
             }
+            summary << "${pipelineName} - Publish PROD: Completed successfully."
 
             // Step 6: Optional Unpublish in UAT
             if (!params.KEEP_PUBLISHED_IN_LOWER_ENV) {
                 unpublishInUATWithValidationPrefix(customer, pipelineName)
+                summary << "${pipelineName} - Unpublish UAT: Completed successfully."
             }
 
-            summary << "${pipelineName} - Steps 5-6 completed successfully."
-
         } catch (Exception e) {
-            summary << "${pipelineName} - Failed during Steps 5-6: ${e.message}"
-            error("Breaking after failure in Steps 5-6")
+            summary << "${pipelineName} - Failed during (Publish PROD/Unpublish UAT): ${e.message}"
+            error("Breaking after failure in Steps (Publish PROD/Unpublish UAT)")
         }
     }
 
     env.SUMMARY_REPORT += "\n" + summary.join("\n")
 }
 
-// Helper Functions
-
+// Helper Functions (for unpublish, publish, and promote steps)
 def unpublishInNPE(customer, pipelineName, parentDAGFolder) {
     def url = "${env.NPE_API}unpublish"
     def body = """{"customer": "${customer}", "name": "${pipelineName}", "parentDAGFolder": "${parentDAGFolder}", "bu": "ca"}"""
