@@ -1,0 +1,353 @@
+pipeline {
+    agent any
+
+    parameters {
+        choice(name: 'PROMOTION_FLOW', choices: ['NPE->UAT->PROD', 'NPE->UAT', 'UAT->PROD'], description: 'Select Promotion Flow')
+        booleanParam(name: 'REPUBLISH_BEFORE_PROMOTING', defaultValue: false, description: 'Republish before promoting')
+        booleanParam(name: 'KEEP_PUBLISHED_IN_LOWER_ENV', defaultValue: true, description: 'Keep pipeline published in lower environment after promoting')
+        string(name: 'DAG_PREFIX', defaultValue: 'CAGBPOFLN_', description: 'DAG Prefix')
+        choice(name: 'RETRIES', choices: ['0', '1', '2'], description: 'Number of retries on failure')
+        text(name: 'PIPELINES_TO_PROMOTE', description: 'List of pipelines to promote, one per line', defaultValue: 'dummy-customer/one-name-1\ndummy-customer/two-name-2\ndummy-customer/three-name-3\ndummy-customer/four-name-4')
+        string(name: 'EMAIL_ADDRESS', defaultValue: '', description: 'Email address to send the summary report')
+    }
+
+    environment {
+        NPE_API = 'https://global-star.alpha.km/config/'
+        UAT_API = 'https://global-star.uat.km/config/'
+        PROD_API = 'https://global-star.prd.km/config/'
+        NPE_AUTH_URL = 'https://ram-ntr-app.npe.pk/oauth2/token'
+        UAT_PROD_AUTH_URL = 'https://ram-ntr-app.uat.pk/oauth2/token'
+        NPE_TO_UAT_PROMOTE_URL = 'https://global-batch-app.alpha.km/config/promote'
+        UAT_TO_PROD_PROMOTE_URL = 'https://global-batch-app.uat.km/config/promote'
+        BUCKET_UAT = 'northamerica-northeast1-ca-gbp-consumer-uat'
+        BUCKET_PROD = 'northamerica-northeast1-ca-gbp-consumer-prd'
+    }
+
+    stages {
+        stage('Generate OAuth Tokens') {
+            steps {
+                script {
+                    echo "Starting OAuth token generation..."
+
+                    // Generate OAuth token for NPE if needed
+                    if (params.PROMOTION_FLOW != 'UAT->PROD') {
+                        echo "Generating OAuth token for NPE..."
+                        withCredentials([usernamePassword(credentialsId: 'CLIENT_API_SNAPSHOT', passwordVariable: 'NPE_CLIENT_SECRET', usernameVariable: 'NPE_CLIENT_ID')]) {
+                            def npeOauthUrl = "${env.NPE_AUTH_URL}"
+                            def npeRequestBody = "client_id=${env.NPE_CLIENT_ID}&client_secret=${env.NPE_CLIENT_SECRET}&grant_type=client_credentials"
+                            def npeResponse = sh(script: """
+                                curl -s -X POST -H 'Content-Type: application/x-www-form-urlencoded' -d '${npeRequestBody}' ${npeOauthUrl} | jq -r '.access_token'
+                            """, returnStdout: true).trim()
+
+                            if (npeResponse) {
+                                env.NPE_TOKEN = npeResponse
+                                echo "NPE OAuth Token obtained successfully."
+                            } else {
+                                error("Failed to obtain OAuth token for NPE.")
+                            }
+                        }
+                    }
+
+                    // Generate OAuth token for UAT/PROD
+                    echo "Generating OAuth token for UAT/PROD..."
+                    withCredentials([usernamePassword(credentialsId: 'GBP-OUTBOUND-PROD', passwordVariable: 'CLIENT_SECRET', usernameVariable: 'CLIENT_ID')]) {
+                        def uatProdOauthUrl = "${env.UAT_PROD_AUTH_URL}"
+                        def uatProdRequestBody = "client_id=${env.CLIENT_ID}&client_secret=${env.CLIENT_SECRET}&grant_type=client_credentials"
+                        def uatProdResponse = sh(script: """
+                            curl -s -X POST -H 'Content-Type: application/x-www-form-urlencoded' -d '${uatProdRequestBody}' ${uatProdOauthUrl} | jq -r '.access_token'
+                        """, returnStdout: true).trim()
+
+                        if (uatProdResponse) {
+                            env.UAT_PROD_TOKEN = uatProdResponse
+                            echo "UAT/PROD OAuth Token obtained successfully."
+                        } else {
+                            error("Failed to obtain OAuth token for UAT/PROD.")
+                        }
+                    }
+
+                    echo "OAuth token generation completed."
+                }
+            }
+        }
+
+        stage('Promotion Execution') {
+            steps {
+                script {
+                    try {
+                        if (params.PROMOTION_FLOW == 'NPE->UAT->PROD') {
+                            executeNPEtoUATtoPROD()
+                        } else if (params.PROMOTION_FLOW == 'NPE->UAT') {
+                            executeNPEtoUAT()
+                        } else if (params.PROMOTION_FLOW == 'UAT->PROD') {
+                            executeUATtoPROD()
+                        }
+                    } catch (Exception e) {
+                        // Capture the error and break the pipeline
+                        env.ERROR_MESSAGE = e.message
+                        error("Pipeline failed: ${env.ERROR_MESSAGE}")
+                    }
+                }
+            }
+        }
+
+        stage('Send Summary Email') {
+            steps {
+                script {
+                    def emailAddress = params.EMAIL_ADDRESS
+                    def summaryReport = env.SUMMARY_REPORT ?: "Pipeline completed without errors."
+
+                    if (env.ERROR_MESSAGE) {
+                        summaryReport += "\nError: ${env.ERROR_MESSAGE}"
+                    }
+
+                    if (emailAddress) {
+                        emailext (
+                            subject: "Pipeline Promotion Summary Report",
+                            body: """
+                            Hello,
+
+                            Here is the summary report for the pipeline promotion process:
+
+                            ${summaryReport}
+
+                            Best Regards,
+                            Jenkins
+                            """,
+                            to: emailAddress
+                        )
+                    } else {
+                        echo "No email address provided. Skipping email report."
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Function for NPE->UAT->PROD Promotion
+def executeNPEtoUATtoPROD() {
+    def pipelines = params.PIPELINES_TO_PROMOTE.split("\n")
+    def summary = []
+
+    pipelines.each { pipeline ->
+        def customer = pipeline.split('/')[0]
+        def pipelineName = pipeline.split('/')[1]
+        def parentDAGFolder = "${params.DAG_PREFIX}${pipelineName.toUpperCase().replace('-', '_')}"
+
+        try {
+            echo "Processing NPE->UAT->PROD for pipeline: ${pipelineName}"
+
+            // Step 1: Unpublish in NPE (optional)
+            if (params.REPUBLISH_BEFORE_PROMOTING) {
+                unpublishInNPE(customer, pipelineName, parentDAGFolder)
+                sleep(5)
+            }
+
+            // Step 2: Publish in NPE (optional, BREAK on failure)
+            if (params.REPUBLISH_BEFORE_PROMOTING) {
+                retry(params.RETRIES.toInteger()) {
+                    publishInNPE(customer, pipelineName, parentDAGFolder)
+                }
+                sleep(5)
+            }
+
+            // Step 3: Unpublish in UAT
+            unpublishInUATWithValidationPrefix(customer, pipelineName)
+            sleep(5)
+
+            // Step 4: Promote NPE->UAT
+            retry(params.RETRIES.toInteger()) {
+                promoteNPEtoUAT(customer, pipelineName, parentDAGFolder)
+            }
+
+            sleep(time: 5, unit: 'MINUTES')
+
+            // Step 5: Publish in UAT (BREAK on failure)
+            retry(params.RETRIES.toInteger()) {
+                publishInUATWithValidationPrefix(customer, pipelineName)
+            }
+
+            // Step 6: Unpublish in NPE (optional)
+            if (!params.KEEP_PUBLISHED_IN_LOWER_ENV) {
+                unpublishInNPE(customer, pipelineName, parentDAGFolder)
+            }
+
+            // Step 7: Unpublish in PROD
+            unpublishInPROD(customer, pipelineName, parentDAGFolder)
+
+            // Step 8: Promote UAT->PROD
+            retry(params.RETRIES.toInteger()) {
+                promoteUATtoPROD(customer, pipelineName, parentDAGFolder)
+            }
+
+            sleep(time: 5, unit: 'MINUTES')
+
+            // Step 9: Publish in PROD
+            retry(params.RETRIES.toInteger()) {
+                publishInPROD(customer, pipelineName, parentDAGFolder)
+            }
+
+            // Step 10: Unpublish in UAT (optional)
+            if (!params.KEEP_PUBLISHED_IN_LOWER_ENV) {
+                unpublishInUATWithValidationPrefix(customer, pipelineName)
+            }
+
+            summary << "${pipelineName} - NPE->UAT->PROD promotion completed successfully."
+
+        } catch (Exception e) {
+            summary << "${pipelineName} - Failed during NPE->UAT->PROD promotion: ${e.message}"
+            error("Breaking after failure in NPE->UAT->PROD promotion")
+        }
+    }
+
+    env.SUMMARY_REPORT = summary.join("\n")
+}
+
+// Function for NPE->UAT Promotion
+def executeNPEtoUAT() {
+    def pipelines = params.PIPELINES_TO_PROMOTE.split("\n")
+    def summary = []
+
+    pipelines.each { pipeline ->
+        def customer = pipeline.split('/')[0]
+        def pipelineName = pipeline.split('/')[1]
+        def parentDAGFolder = "${params.DAG_PREFIX}${pipelineName.toUpperCase().replace('-', '_')}"
+
+        try {
+            echo "Processing NPE->UAT for pipeline: ${pipelineName}"
+
+            // Step 1: Unpublish in NPE (optional)
+            if (params.REPUBLISH_BEFORE_PROMOTING) {
+                unpublishInNPE(customer, pipelineName, parentDAGFolder)
+                sleep(5)
+            }
+
+            // Step 2: Publish in NPE (optional, BREAK on failure)
+            if (params.REPUBLISH_BEFORE_PROMOTING) {
+                retry(params.RETRIES.toInteger()) {
+                    publishInNPE(customer, pipelineName, parentDAGFolder)
+                }
+                sleep(5)
+            }
+
+            // Step 3: Unpublish in UAT (proceed regardless of status)
+            unpublishInUATWithValidationPrefix(customer, pipelineName)
+            sleep(5)
+
+            // Step 4: Promote NPE->UAT
+            retry(params.RETRIES.toInteger()) {
+                promoteNPEtoUAT(customer, pipelineName, parentDAGFolder)
+            }
+
+            sleep(time: 5, unit: 'MINUTES')
+
+            // Step 5: Optional Unpublish in NPE
+            if (!params.KEEP_PUBLISHED_IN_LOWER_ENV) {
+                unpublishInNPE(customer, pipelineName, parentDAGFolder)
+            }
+
+            summary << "${pipelineName} - NPE->UAT promotion completed successfully."
+
+        } catch (Exception e) {
+            summary << "${pipelineName} - Failed during NPE->UAT promotion: ${e.message}"
+            error("Breaking after failure in NPE->UAT promotion")
+        }
+    }
+
+    env.SUMMARY_REPORT = summary.join("\n")
+}
+
+// Function for UAT->PROD Promotion
+def executeUATtoPROD() {
+    def pipelines = params.PIPELINES_TO_PROMOTE.split("\n")
+    def summary = []
+
+    // Sequential execution for Steps 1 to 3
+    pipelines.each { pipeline ->
+        def customer = pipeline.split('/')[0]
+        def pipelineName = pipeline.split('/')[1]
+        def parentDAGFolder = "${params.DAG_PREFIX}${pipelineName.toUpperCase().replace('-', '_')}"
+
+        try {
+            echo "Processing UAT->PROD for pipeline: ${pipelineName}"
+
+            // Step 1: Unpublish in UAT (optional)
+            if (params.REPUBLISH_BEFORE_PROMOTING) {
+                unpublishInUATWithValidationPrefix(customer, pipelineName)
+                sleep(5)
+            }
+
+            // Step 2: Publish in UAT (optional, BREAK on failure)
+            if (params.REPUBLISH_BEFORE_PROMOTING) {
+                retry(params.RETRIES.toInteger()) {
+                    publishInUATWithValidationPrefix(customer, pipelineName)
+                }
+                sleep(5)
+            }
+
+            // Step 3: Unpublish in PROD (proceed regardless of status)
+            unpublishInPROD(customer, pipelineName, parentDAGFolder)
+            sleep(5)
+
+            summary << "${pipelineName} - Steps 1-3 (UAT->PROD) completed successfully."
+
+        } catch (Exception e) {
+            summary << "${pipelineName} - Failed during Steps 1-3 (UAT->PROD): ${e.message}"
+            error("Breaking after failure in Steps 1-3 (UAT->PROD)")
+        }
+    }
+
+    env.SUMMARY_REPORT = summary.join("\n")
+
+    // Step 4: Promote UAT->PROD (sequentially for all pipelines, then wait 5 minutes)
+    pipelines.each { pipeline ->
+        def customer = pipeline.split('/')[0]
+        def pipelineName = pipeline.split('/')[1]
+        def parentDAGFolder = "${params.DAG_PREFIX}${pipelineName.toUpperCase().replace('-', '_')}"
+
+        try {
+            retry(params.RETRIES.toInteger()) {
+                promoteUATtoPROD(customer, pipelineName, parentDAGFolder)
+            }
+
+            summary << "${pipelineName} - Step 4 (Promote UAT->PROD) completed successfully."
+
+        } catch (Exception e) {
+            summary << "${pipelineName} - Failed during Step 4 (Promote UAT->PROD): ${e.message}"
+            error("Breaking after failure in Step 4 (Promote UAT->PROD)")
+        }
+    }
+
+    env.SUMMARY_REPORT += "\n" + summary.join("\n")
+
+    // Wait 5 minutes after promotion before proceeding to Step 5
+    echo "Waiting 5 minutes after UAT->PROD promotion..."
+    sleep(time: 5, unit: 'MINUTES')
+
+    // Step 5 and Step 6: Publish in PROD and Optional Unpublish in UAT
+    pipelines.each { pipeline ->
+        def customer = pipeline.split('/')[0]
+        def pipelineName = pipeline.split('/')[1]
+        def parentDAGFolder = "${params.DAG_PREFIX}${pipelineName.toUpperCase().replace('-', '_')}"
+
+        try {
+            // Step 5: Publish in PROD (BREAK on failure)
+            retry(params.RETRIES.toInteger()) {
+                publishInPROD(customer, pipelineName, parentDAGFolder)
+            }
+
+            // Step 6: Optional Unpublish in UAT (if checkbox B is NOT enabled)
+            if (!params.KEEP_PUBLISHED_IN_LOWER_ENV) {
+                unpublishInUATWithValidationPrefix(customer, pipelineName)
+            }
+
+            summary << "${pipelineName} - Steps 5-6 (Publish in PROD and Unpublish in UAT) completed successfully."
+
+        } catch (Exception e) {
+            summary << "${pipelineName} - Failed during Steps 5-6: ${e.message}"
+            error("Breaking after failure in Steps 5-6")
+        }
+    }
+
+    env.SUMMARY_REPORT += "\n" + summary.join("\n")
+}
