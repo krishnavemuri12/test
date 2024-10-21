@@ -304,5 +304,123 @@ def handleApiCall(def apiName, def apiCall) {
         error("${apiName} failed. Breaking pipeline.")
     }
 }
+-----
+def executeNPEtoUATtoPROD() {
+    def pipelines = params.PIPELINES_TO_PROMOTE.split("\n")
+    def summary = []
+
+    pipelines.each { pipeline ->
+        def customer = pipeline.split('/')[0]
+        def pipelineName = pipeline.split('/')[1]
+        def parentDAGFolder = "${params.DAG_PREFIX}${pipelineName.toUpperCase().replace('-', '_')}"
+
+        try {
+            echo "Processing NPE->UAT->PROD for pipeline: ${pipelineName}"
+
+            // Step 1: Unpublish in NPE
+            if (params.REPUBLISH_BEFORE_PROMOTING) {
+                def output = sh(script: "curl -X POST 'your_unpublish_npe_api_call'", returnStdout: true)
+                if (output.contains("ValidationException") || output.contains("error") || output.contains("fail")) {
+                    error("Unpublish NPE failed: ${output}")
+                }
+                echo "Unpublish NPE completed successfully."
+                summary << "${pipelineName} - Unpublish NPE: Completed successfully."
+            }
+
+            // Step 2: Publish in NPE
+            if (params.REPUBLISH_BEFORE_PROMOTING) {
+                def output = sh(script: "curl -X POST 'your_publish_npe_api_call'", returnStdout: true)
+                if (output.contains("ValidationException") || output.contains("error") || output.contains("fail")) {
+                    error("Publish NPE failed: ${output}")
+                }
+                echo "Publish NPE completed successfully."
+                summary << "${pipelineName} - Publish NPE: Completed successfully."
+            }
+
+            // Step 3: Unpublish in UAT
+            def output = sh(script: "curl -X POST 'your_unpublish_uat_api_call'", returnStdout: true)
+            if (output.contains("ValidationException") || output.contains("error") || output.contains("fail")) {
+                error("Unpublish UAT failed: ${output}")
+            }
+            echo "Unpublish UAT completed successfully."
+            summary << "${pipelineName} - Unpublish UAT: Completed successfully."
+
+            // Step 4: Promote NPE->UAT
+            output = sh(script: "curl -X POST 'your_promote_npe_to_uat_api_call'", returnStdout: true)
+            if (output.contains("ValidationException") || output.contains("error") || output.contains("fail")) {
+                error("Promote NPE->UAT failed: ${output}")
+            }
+            echo "Promote NPE->UAT completed successfully."
+            summary << "${pipelineName} - Promote NPE->UAT: Completed successfully."
+
+            // Wait for 5 minutes after promotion
+            echo "Waiting 5 minutes after NPE->UAT promotion..."
+            sleep(time: 5, unit: 'MINUTES')
+
+            // Step 5: Publish in UAT
+            output = sh(script: "curl -X POST 'your_publish_uat_api_call'", returnStdout: true)
+            if (output.contains("ValidationException") || output.contains("error") || output.contains("fail")) {
+                error("Publish UAT failed: ${output}")
+            }
+            echo "Publish UAT completed successfully."
+            summary << "${pipelineName} - Publish UAT: Completed successfully."
+
+            // Step 6: Unpublish in NPE (optional)
+            if (!params.KEEP_PUBLISHED_IN_LOWER_ENV) {
+                output = sh(script: "curl -X POST 'your_unpublish_npe_api_call'", returnStdout: true)
+                if (output.contains("ValidationException") || output.contains("error") || output.contains("fail")) {
+                    error("Unpublish NPE failed: ${output}")
+                }
+                echo "Unpublish NPE completed successfully."
+                summary << "${pipelineName} - Unpublish NPE: Completed successfully."
+            }
+
+            // Step 7: Unpublish in PROD
+            output = sh(script: "curl -X POST 'your_unpublish_prod_api_call'", returnStdout: true)
+            if (output.contains("ValidationException") || output.contains("error") || output.contains("fail")) {
+                error("Unpublish PROD failed: ${output}")
+            }
+            echo "Unpublish PROD completed successfully."
+            summary << "${pipelineName} - Unpublish PROD: Completed successfully."
+
+            // Step 8: Promote UAT->PROD
+            output = sh(script: "curl -X POST 'your_promote_uat_to_prod_api_call'", returnStdout: true)
+            if (output.contains("ValidationException") || output.contains("error") || output.contains("fail")) {
+                error("Promote UAT->PROD failed: ${output}")
+            }
+            echo "Promote UAT->PROD completed successfully."
+            summary << "${pipelineName} - Promote UAT->PROD: Completed successfully."
+
+            // Wait for 5 minutes after promotion
+            echo "Waiting 5 minutes after UAT->PROD promotion..."
+            sleep(time: 5, unit: 'MINUTES')
+
+            // Step 9: Publish in PROD
+            output = sh(script: "curl -X POST 'your_publish_prod_api_call'", returnStdout: true)
+            if (output.contains("ValidationException") || output.contains("error") || output.contains("fail")) {
+                error("Publish PROD failed: ${output}")
+            }
+            echo "Publish PROD completed successfully."
+            summary << "${pipelineName} - Publish PROD: Completed successfully."
+
+            // Step 10: Unpublish in UAT (optional)
+            if (!params.KEEP_PUBLISHED_IN_LOWER_ENV) {
+                output = sh(script: "curl -X POST 'your_unpublish_uat_api_call'", returnStdout: true)
+                if (output.contains("ValidationException") || output.contains("error") || output.contains("fail")) {
+                    error("Unpublish UAT failed: ${output}")
+                }
+                echo "Unpublish UAT completed successfully."
+                summary << "${pipelineName} - Unpublish UAT: Completed successfully."
+            }
+
+        } catch (Exception e) {
+            echo "Pipeline ${pipelineName} failed: ${e.message}"
+            summary << "${pipelineName} - Failed: ${e.message}"
+        }
+    }
+
+    // Store the summary for the email
+    env.SUMMARY_REPORT = summary.join("\n")
+}
 
 
