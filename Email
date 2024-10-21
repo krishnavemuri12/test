@@ -48,3 +48,36 @@ pipeline {
         }
     }
 }
+-------
+\stage('Send Summary Email') {
+    steps {
+        script {
+            def emailAddress = params.EMAIL_ADDRESS
+            def summaryReport = env.SUMMARY_REPORT?.trim() ?: "Pipeline completed without errors."  // Trim unwanted spaces
+
+            if (env.ERROR_MESSAGE) {
+                summaryReport += "\nError: ${env.ERROR_MESSAGE}".trim()  // Trim spaces in error message
+            }
+
+            // Ensure the email body does not contain extra spaces or unnecessary new lines
+            def emailBody = """
+                Hello,
+
+                Here is the summary report for the pipeline promotion process:
+
+                ${summaryReport.trim()}  // Trim any trailing spaces from the summary report
+                """.stripIndent().trim()  // Strip any indentations from the email body
+
+            if (emailAddress) {
+                emailext (
+                    subject: "Pipeline Promotion Summary Report",
+                    body: emailBody,  // Use the formatted email body
+                    to: emailAddress
+                )
+            } else {
+                echo "No email address provided. Skipping email report."
+            }
+        }
+    }
+}
+
