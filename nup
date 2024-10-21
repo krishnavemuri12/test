@@ -277,4 +277,32 @@ def handleApiCall(def apiName, def apiCall) {
         error("${apiName} failed. Breaking pipeline.")
     }
 }
+___
+def handleApiCall(def apiName, def apiCall) {
+    try {
+        // Capture the output of the API call, including stderr
+        def output = sh(script: "${apiCall}", returnStdout: true).trim()
+        def errorOutput = sh(script: "${apiCall} 2>&1", returnStdout: true).trim()
+
+        // Combine stdout and stderr
+        def fullOutput = output + "\n" + errorOutput
+
+        if (fullOutput.contains("ValidationException") || 
+            fullOutput.contains("fail") || 
+            fullOutput.contains("error") || 
+            fullOutput.contains("exception")) {
+            echo "${apiName} failed with error: ${fullOutput}"
+            env.SUMMARY_REPORT += "${apiName} - Failed (${fullOutput})\n"
+            error("${apiName} failed. Breaking pipeline.")
+        } else {
+            echo "${apiName} completed successfully."
+            env.SUMMARY_REPORT += "${apiName} - Completed successfully.\n"
+        }
+    } catch (Exception e) {
+        echo "${apiName} failed with error: ${e.message}"
+        env.SUMMARY_REPORT += "${apiName} - Failed (${e.message})\n"
+        error("${apiName} failed. Breaking pipeline.")
+    }
+}
+
 
