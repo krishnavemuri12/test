@@ -1,0 +1,141 @@
+// Function for NPE->UAT->PROD Promotion
+def executeNPEtoUATtoPROD() {
+    def pipelines = params.PIPELINES_TO_PROMOTE.split("\n")
+    def summary = []
+
+    // Step 1 to Step 3 sequential for each pipeline
+    pipelines.each { pipeline ->
+        def customer = pipeline.split('/')[0]
+        def pipelineName = pipeline.split('/')[1]
+        def parentDAGFolder = "${params.DAG_PREFIX}${pipelineName.toUpperCase().replace('-', '_')}"
+
+        try {
+            echo "Processing NPE->UAT->PROD for pipeline: ${pipelineName}"
+
+            if (params.REPUBLISH_BEFORE_PROMOTING) {
+                handleApiCall("Unpublish NPE", { unpublishInNPE(customer, pipelineName, parentDAGFolder) })
+                sleep(5)
+            }
+
+            if (params.REPUBLISH_BEFORE_PROMOTING) {
+                handleApiCall("Publish NPE", { publishInNPE(customer, pipelineName, parentDAGFolder) })
+                sleep(5)
+            }
+
+            handleApiCall("Unpublish UAT", { unpublishInUATWithValidationPrefix(customer, pipelineName) })
+            sleep(5)
+
+        } catch (Exception e) {
+            summary << "${pipelineName} - Unpublish NPE/UAT: Failed (${e.message})"
+            error("Breaking after failure in Steps (Unpublish NPE/UAT)")
+        }
+    }
+
+    // Step 4: Promote NPE->UAT for all pipelines, then wait 5 minutes
+    pipelines.each { pipeline ->
+        def customer = pipeline.split('/')[0]
+        def pipelineName = pipeline.split('/')[1]
+        def parentDAGFolder = "${params.DAG_PREFIX}${pipelineName.toUpperCase().replace('-', '_')}"
+
+        try {
+            handleApiCall("Promote NPE->UAT", { promoteNPEtoUAT(customer, pipelineName, parentDAGFolder) })
+        } catch (Exception e) {
+            summary << "${pipelineName} - Promote NPE->UAT: Failed (${e.message})"
+            error("Breaking after failure in Step 4 (Promote NPE->UAT)")
+        }
+    }
+
+    env.SUMMARY_REPORT = summary.join("\n")
+
+    echo "Waiting 5 minutes after NPE->UAT promotion..."
+    sleep(time: 5, unit: 'MINUTES')
+
+    // Step 5 to 7 sequential for each pipeline
+    pipelines.each { pipeline ->
+        def customer = pipeline.split('/')[0]
+        def pipelineName = pipeline.split('/')[1]
+        def parentDAGFolder = "${params.DAG_PREFIX}${pipelineName.toUpperCase().replace('-', '_')}"
+
+        try {
+            // Step 5: Publish in UAT
+            handleApiCall("Publish UAT", { publishInUATWithValidationPrefix(customer, pipelineName) })
+            sleep(5)
+
+            // Step 6: Optional Unpublish in NPE
+            if (!params.KEEP_PUBLISHED_IN_LOWER_ENV) {
+                handleApiCall("Unpublish NPE", { unpublishInNPE(customer, pipelineName, parentDAGFolder) })
+                sleep(5)
+            }
+
+            // Step 7: Unpublish in PROD
+            handleApiCall("Unpublish PROD", { unpublishInPROD(customer, pipelineName, parentDAGFolder) })
+            sleep(5)
+
+        } catch (Exception e) {
+            summary << "${pipelineName} - Failed during (Publish UAT/Unpublish PROD): ${e.message}"
+            error("Breaking after failure in Steps (Publish UAT/Unpublish PROD)")
+        }
+    }
+
+    env.SUMMARY_REPORT += "\n" + summary.join("\n")
+
+    // Step 8: Promote UAT->PROD for all pipelines, then wait 5 minutes
+    pipelines.each { pipeline ->
+        def customer = pipeline.split('/')[0]
+        def pipelineName = pipeline.split('/')[1]
+        def parentDAGFolder = "${params.DAG_PREFIX}${pipelineName.toUpperCase().replace('-', '_')}"
+
+        try {
+            handleApiCall("Promote UAT->PROD", { promoteUATtoPROD(customer, pipelineName, parentDAGFolder) })
+        } catch (Exception e) {
+            summary << "${pipelineName} - Promote UAT->PROD: Failed (${e.message})"
+            error("Breaking after failure in Step 8 (Promote UAT->PROD)")
+        }
+    }
+
+    env.SUMMARY_REPORT += "\n" + summary.join("\n")
+
+    echo "Waiting 5 minutes after UAT->PROD promotion..."
+    sleep(time: 5, unit: 'MINUTES')
+
+    // Step 9 and Step 10: Publish in PROD and Optional Unpublish in UAT
+    pipelines.each { pipeline ->
+        def customer = pipeline.split('/')[0]
+        def pipelineName = pipeline.split('/')[1]
+        def parentDAGFolder = "${params.DAG_PREFIX}${pipelineName.toUpperCase().replace('-', '_')}"
+
+        try {
+            // Step 9: Publish in PROD
+            handleApiCall("Publish PROD", { publishInPROD(customer, pipelineName, parentDAGFolder) })
+
+            // Step 10: Optional Unpublish in UAT
+            if (!params.KEEP_PUBLISHED_IN_LOWER_ENV) {
+                handleApiCall("Unpublish UAT", { unpublishInUATWithValidationPrefix(customer, pipelineName) })
+            }
+
+        } catch (Exception e) {
+            summary << "${pipelineName} - Failed during (Publish PROD/Unpublish UAT): ${e.message}"
+            error("Breaking after failure in Steps (Publish PROD/Unpublish UAT)")
+        }
+    }
+
+    env.SUMMARY_REPORT += "\n" + summary.join("\n")
+}
+-----
+def handleApiCall(def apiName, def apiCall) {
+    try {
+        def output = apiCall()  // Execute the actual API call and capture output
+        echo "${apiName} completed successfully."
+        
+        // Check for error patterns in the output
+        if (output.contains("ValidationException") || output.toLowerCase().contains("fail") || output.toLowerCase().contains("error") || output.toLowerCase().contains("exception")) {
+            throw new Exception("Error found in API response: ${output}")
+        }
+        
+        env.SUMMARY_REPORT += "${apiName} - Completed successfully.\n"
+    } catch (Exception e) {
+        echo "${apiName} failed with error: ${e.message}"
+        env.SUMMARY_REPORT += "${apiName} - Failed (${e.message})\n"
+        error("${apiName} failed. Breaking pipeline.")
+    }
+}
