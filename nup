@@ -139,3 +139,142 @@ def handleApiCall(def apiName, def apiCall) {
         error("${apiName} failed. Breaking pipeline.")
     }
 }
+-------
+1
+def handleApiCall(def apiName, def apiCall) {
+    try {
+        // Capture the output of the API call
+        def output = apiCall()
+
+        // Add a null check for the output
+        if (output != null) {
+            // Check for error-related keywords
+            if (output.contains("ValidationException") || 
+                output.contains("fail") || 
+                output.contains("error") || 
+                output.contains("exception")) {
+                echo "${apiName} failed with error: ${output}"
+                env.SUMMARY_REPORT += "${apiName} - Failed (${output})\n"
+                error("${apiName} failed. Breaking pipeline.")
+            } else {
+                echo "${apiName} completed successfully."
+                env.SUMMARY_REPORT += "${apiName} - Completed successfully.\n"
+            }
+        } else {
+            echo "${apiName} output is null."
+            env.SUMMARY_REPORT += "${apiName} - Failed (No output)\n"
+            error("${apiName} failed due to null output. Breaking pipeline.")
+        }
+    } catch (Exception e) {
+        echo "${apiName} failed with error: ${e.message}"
+        env.SUMMARY_REPORT += "${apiName} - Failed (${e.message})\n"
+        error("${apiName} failed. Breaking pipeline.")
+    }
+}
+-----
+2
+def handleApiCall(def apiName, def apiCall) {
+    try {
+        // Capture the output of the API call
+        def output = apiCall()
+
+        // Convert output to string if it's not null
+        def outputStr = output != null ? output.toString() : ""
+
+        // Add a check to ensure it's a string and not empty
+        if (!outputStr.isEmpty()) {
+            // Check for error-related keywords
+            if (outputStr.contains("ValidationException") || 
+                outputStr.contains("fail") || 
+                outputStr.contains("error") || 
+                outputStr.contains("exception")) {
+                echo "${apiName} failed with error: ${outputStr}"
+                env.SUMMARY_REPORT += "${apiName} - Failed (${outputStr})\n"
+                error("${apiName} failed. Breaking pipeline.")
+            } else {
+                echo "${apiName} completed successfully."
+                env.SUMMARY_REPORT += "${apiName} - Completed successfully.\n"
+            }
+        } else {
+            echo "${apiName} output is empty or null."
+            env.SUMMARY_REPORT += "${apiName} - Failed (No output)\n"
+            error("${apiName} failed due to empty output. Breaking pipeline.")
+        }
+    } catch (Exception e) {
+        echo "${apiName} failed with error: ${e.message}"
+        env.SUMMARY_REPORT += "${apiName} - Failed (${e.message})\n"
+        error("${apiName} failed. Breaking pipeline.")
+    }
+}
+-----
+3
+def handleApiCall(def apiName, def apiCall) {
+    try {
+        // Capture the output of the API call
+        def output = apiCall()
+
+        // Log the type of output if it's not null
+        if (output != null) {
+            echo "Output type: ${output.getClass().getName()}"
+        }
+
+        // Convert to string for processing
+        def outputStr = output != null ? output.toString() : ""
+
+        // Now proceed with the string checks
+        if (!outputStr.isEmpty()) {
+            if (outputStr.contains("ValidationException") || 
+                outputStr.contains("fail") || 
+                outputStr.contains("error") || 
+                outputStr.contains("exception")) {
+                echo "${apiName} failed with error: ${outputStr}"
+                env.SUMMARY_REPORT += "${apiName} - Failed (${outputStr})\n"
+                error("${apiName} failed. Breaking pipeline.")
+            } else {
+                echo "${apiName} completed successfully."
+                env.SUMMARY_REPORT += "${apiName} - Completed successfully.\n"
+            }
+        } else {
+            echo "${apiName} output is empty or null."
+            env.SUMMARY_REPORT += "${apiName} - Failed (No output)\n"
+            error("${apiName} failed due to empty output. Breaking pipeline.")
+        }
+    } catch (Exception e) {
+        echo "${apiName} failed with error: ${e.message}"
+        env.SUMMARY_REPORT += "${apiName} - Failed (${e.message})\n"
+        error("${apiName} failed. Breaking pipeline.")
+    }
+}
+----
+main
+def handleApiCall(def apiName, def apiCall) {
+    try {
+        // Capture the output of the API call
+        def output = apiCall()
+
+        // Add a null check for the output
+        if (output != null) {
+            // Check for error-related keywords
+            if (output.contains("ValidationException") || 
+                output.contains("fail") || 
+                output.contains("error") || 
+                output.contains("exception")) {
+                echo "${apiName} failed with error: ${output}"
+                env.SUMMARY_REPORT += "${apiName} - Failed (${output})\n"
+                error("${apiName} failed. Breaking pipeline.")
+            } else {
+                echo "${apiName} completed successfully."
+                env.SUMMARY_REPORT += "${apiName} - Completed successfully.\n"
+            }
+        } else {
+            echo "${apiName} output is null."
+            env.SUMMARY_REPORT += "${apiName} - Failed (No output)\n"
+            error("${apiName} failed due to null output. Breaking pipeline.")
+        }
+    } catch (Exception e) {
+        echo "${apiName} failed with error: ${e.message}"
+        env.SUMMARY_REPORT += "${apiName} - Failed (${e.message})\n"
+        error("${apiName} failed. Breaking pipeline.")
+    }
+}
+
