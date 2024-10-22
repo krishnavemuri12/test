@@ -1,0 +1,146 @@
+stage('Unpublish in PROD') {
+    steps {
+        script {
+            def pipelines = params.PIPELINE_LIST.split("\n")
+            for (pipeline in pipelines) {
+                if (!pipelineResults.containsKey(pipeline)) {
+                    pipelineResults[pipeline] = [:]
+                }
+                try {
+                    def customer = pipeline.split("/")[0].trim()
+                    def name = pipeline.split("/")[1].trim()
+                    def capitalized_name = name.toUpperCase().replace("-", "_")
+                    def parentDAGFolder = "${params.DAG_PREFIX}${capitalized_name}"
+
+                    echo "Unpublishing pipeline ${pipeline} in PROD..."
+                    def body = """{ "customer": "${customer}", "name": "${name}", "bu": "ca", "parentDAGFolder": "${parentDAGFolder}" }"""
+                    def apiResponse = sh(script: "curl -X POST ${PROD_UNPUBLISH_URL} -H 'Authorization: Bearer ${env.UAT_PROD_TOKEN}' -H 'Content-Type: application/json' -d '${body}' -k", returnStdout: true).trim()
+
+                    echo "API Response: ${apiResponse}"
+
+                    if (apiResponse.contains("fail") || apiResponse.contains("error") || apiResponse.contains("ValidationException") || apiResponse.contains("timeout")) {
+                        pipelineResults[pipeline]["Unpublish PROD"] = "Error: ${apiResponse}"
+                        error("Error in Unpublish PROD: ${apiResponse}")
+                    } else {
+                        pipelineResults[pipeline]["Unpublish PROD"] = "Success"
+                    }
+                } catch (Exception e) {
+                    pipelineResults[pipeline]["Unpublish PROD"] = "Error: ${e.message}"
+                    error("Caught Exception in Unpublish PROD: ${e.message}")
+                }
+                sleep time: 5, unit: 'SECONDS'
+            }
+        }
+    }
+}
+----
+stage('Promote from UAT to PROD') {
+    steps {
+        script {
+            def pipelines = params.PIPELINE_LIST.split("\n")
+            for (pipeline in pipelines) {
+                if (!pipelineResults.containsKey(pipeline)) {
+                    pipelineResults[pipeline] = [:]
+                }
+                try {
+                    def customer = pipeline.split("/")[0].trim()
+                    def name = pipeline.split("/")[1].trim()
+                    def capitalized_name = name.toUpperCase().replace("-", "_")
+                    def parentDAGFolder = "${params.DAG_PREFIX}${capitalized_name}"
+
+                    echo "Promoting pipeline ${pipeline} from UAT to PROD..."
+                    def body = """{ "customer": "${customer}", "name": "${name}", "bu": "ca", "parentDAGFolder": "${parentDAGFolder}", "bucket": "northamerica-northeast1-ca-gbp-consumer-prd" }"""
+                    def apiResponse = sh(script: "curl -X POST ${PROMOTE_UAT_TO_PROD_URL} -H 'Authorization: Bearer ${env.UAT_PROD_TOKEN}' -H 'Content-Type: application/json' -d '${body}' -k", returnStdout: true).trim()
+
+                    echo "API Response: ${apiResponse}"
+
+                    if (apiResponse.contains("fail") || apiResponse.contains("error") || apiResponse.contains("ValidationException") || apiResponse.contains("timeout")) {
+                        pipelineResults[pipeline]["Promote UAT to PROD"] = "Error: ${apiResponse}"
+                        error("Error in Promote UAT to PROD: ${apiResponse}")
+                    } else {
+                        pipelineResults[pipeline]["Promote UAT to PROD"] = "Success"
+                    }
+                } catch (Exception e) {
+                    pipelineResults[pipeline]["Promote UAT to PROD"] = "Error: ${e.message}"
+                    error("Caught Exception in Promote UAT to PROD: ${e.message}")
+                }
+                sleep time: 5, unit: 'SECONDS'
+            }
+            // Wait for 5 minutes after promotion
+            sleep time: 5, unit: 'MINUTES'
+        }
+    }
+}
+----
+stage('Publish in PROD') {
+    steps {
+        script {
+            def pipelines = params.PIPELINE_LIST.split("\n")
+            for (pipeline in pipelines) {
+                if (!pipelineResults.containsKey(pipeline)) {
+                    pipelineResults[pipeline] = [:]
+                }
+                try {
+                    def customer = pipeline.split("/")[0].trim()
+                    def name = pipeline.split("/")[1].trim()
+                    def capitalized_name = name.toUpperCase().replace("-", "_")
+                    def parentDAGFolder = "${params.DAG_PREFIX}${capitalized_name}"
+
+                    echo "Publishing pipeline ${pipeline} in PROD..."
+                    def body = """{ "customer": "${customer}", "name": "${name}", "bu": "ca", "parentDAGFolder": "${parentDAGFolder}" }"""
+                    def apiResponse = sh(script: "curl -X POST ${PROD_PUBLISH_URL} -H 'Authorization: Bearer ${env.UAT_PROD_TOKEN}' -H 'Content-Type: application/json' -d '${body}' -k", returnStdout: true).trim()
+
+                    echo "API Response: ${apiResponse}"
+
+                    if (apiResponse.contains("fail") || apiResponse.contains("error") || apiResponse.contains("ValidationException") || apiResponse.contains("timeout")) {
+                        pipelineResults[pipeline]["Publish PROD"] = "Error: ${apiResponse}"
+                        error("Error in Publish PROD: ${apiResponse}")
+                    } else {
+                        pipelineResults[pipeline]["Publish PROD"] = "Success"
+                    }
+                } catch (Exception e) {
+                    pipelineResults[pipeline]["Publish PROD"] = "Error: ${e.message}"
+                    error("Caught Exception in Publish PROD: ${e.message}")
+                }
+                sleep time: 5, unit: 'SECONDS'
+            }
+        }
+    }
+}
+----
+stage('Unpublish in UAT (Optional) - lower env') {
+    when { expression { !params.KEEP_PUBLISHED_IN_LOWER_ENV } }
+    steps {
+        script {
+            def pipelines = params.PIPELINE_LIST.split("\n")
+            for (pipeline in pipelines) {
+                if (!pipelineResults.containsKey(pipeline)) {
+                    pipelineResults[pipeline] = [:]
+                }
+                try {
+                    def customer = pipeline.split("/")[0].trim()
+                    def name = pipeline.split("/")[1].trim()
+                    def capitalized_name = name.toUpperCase().replace("-", "_")
+
+                    echo "Unpublishing pipeline ${pipeline} in UAT..."
+                    def body = """{ "customer": "${customer}", "name": "${name}", "bu": "ca", "parentDAGFolder": "VALIDATION_${capitalized_name}" }"""
+                    def apiResponse = sh(script: "curl -X POST ${UAT_UNPUBLISH_URL} -H 'Authorization: Bearer ${env.UAT_PROD_TOKEN}' -H 'Content-Type: application/json' -d '${body}' -k", returnStdout: true).trim()
+
+                    echo "API Response: ${apiResponse}"
+
+                    if (apiResponse.contains("fail") || apiResponse.contains("error") || apiResponse.contains("ValidationException") || apiResponse.contains("timeout")) {
+                        pipelineResults[pipeline]["Unpublish UAT (Optional)"] = "Error: ${apiResponse}"
+                        error("Error in Unpublish UAT (Optional): ${apiResponse}")
+                    } else {
+                        pipelineResults[pipeline]["Unpublish UAT (Optional)"] = "Success"
+                    }
+                } catch (Exception e) {
+                    pipelineResults[pipeline]["Unpublish UAT (Optional)"] = "Error: ${e.message}"
+                    error("Caught Exception in Unpublish UAT (Optional): ${e.message}")
+                }
+                sleep time: 5, unit: 'SECONDS'
+            }
+        }
+    }
+}
+----
