@@ -1,32 +1,5 @@
-// Global variable to hold pipeline results across all stages
+// Define pipelineResults globally outside the pipeline block
 def pipelineResults = [:]
-
-// Helper function to make curl requests and handle errors
-def makeCurlRequest(url, token, body, pipeline, stage) {
-    try {
-        // Make the curl request
-        def response = sh(script: """
-            curl -s -X POST ${url} \
-            -H 'Authorization: Bearer ${token}' \
-            -H 'Content-Type: application/json' \
-            -d '${body}' -k
-        """, returnStdout: true).trim()
-
-        // Log the response for debugging purposes
-        echo "Response from ${stage} for ${pipeline}: ${response}"
-
-        // Check for errors in the response
-        if (response.contains('ValidationException') || response.contains('fail')) {
-            throw new Exception("Error during ${stage} for pipeline ${pipeline}")
-        }
-
-        // Log success
-        pipelineResults[pipeline][stage] = "Success"
-    } catch (Exception e) {
-        // Log failure
-        pipelineResults[pipeline][stage] = "Error: ${e.message}"
-    }
-}
 
 pipeline {
     agent any
@@ -53,222 +26,350 @@ pipeline {
     }
 
     stages {
-        // Stage 1: Generate OAuth Tokens
         stage('Generate OAuth Tokens') {
             steps {
                 script {
+                    def pipelines = params.PIPELINE_LIST.split("\n")
+                    pipelines.each { pipeline ->
+                        pipelineResults[pipeline] = [:]
+                    }
+
                     // Generate OAuth token for NPE if needed
                     if (params.PROMOTION_FLOW != 'UAT->PROD') {
                         withCredentials([usernamePassword(credentialsId: 'CLIENT_API_SNAPSHOT', passwordVariable: 'NPE_CLIENT_SECRET', usernameVariable: 'NPE_CLIENT_ID')]) {
-                            env.NPE_TOKEN = sh(script: """
-                                curl -s -X POST -H 'Content-Type: application/x-www-form-urlencoded' \
-                                -d 'client_id=${env.NPE_CLIENT_ID}&client_secret=${env.NPE_CLIENT_SECRET}&grant_type=client_credentials' \
-                                ${env.NPE_AUTH_URL} | jq -r '.access_token'
+                            def npeOauthUrl = "${env.NPE_AUTH_URL}"
+                            def npeRequestBody = "client_id=${env.NPE_CLIENT_ID}&client_secret=${env.NPE_CLIENT_SECRET}&grant_type=client_credentials"
+                            def npeResponse = sh(script: """
+                                curl -s -X POST -H 'Content-Type: application/x-www-form-urlencoded' -d '${npeRequestBody}' ${npeOauthUrl} | jq -r '.access_token'
                             """, returnStdout: true).trim()
+
+                            if (npeResponse) {
+                                env.NPE_TOKEN = npeResponse
+                                echo "NPE OAuth Token obtained successfully."
+                            } else {
+                                error("Failed to obtain OAuth token for NPE.")
+                            }
                         }
                     }
 
                     // Generate OAuth token for UAT/PROD
                     withCredentials([usernamePassword(credentialsId: 'GBP-OUTBOUND-PROD', passwordVariable: 'CLIENT_SECRET', usernameVariable: 'CLIENT_ID')]) {
-                        env.UAT_PROD_TOKEN = sh(script: """
-                            curl -s -X POST -H 'Content-Type: application/x-www-form-urlencoded' \
-                            -d 'client_id=${env.CLIENT_ID}&client_secret=${env.CLIENT_SECRET}&grant_type=client_credentials' \
-                            ${env.UAT_PROD_AUTH_URL} | jq -r '.access_token'
+                        def uatProdOauthUrl = "${env.UAT_PROD_AUTH_URL}"
+                        def uatProdRequestBody = "client_id=${env.CLIENT_ID}&client_secret=${env.CLIENT_SECRET}&grant_type=client_credentials"
+                        def uatProdResponse = sh(script: """
+                            curl -s -X POST -H 'Content-Type: application/x-www-form-urlencoded' -d '${uatProdRequestBody}' ${uatProdOauthUrl} | jq -r '.access_token'
                         """, returnStdout: true).trim()
-                    }
 
-                    echo "OAuth tokens generated."
+                        if (uatProdResponse) {
+                            env.UAT_PROD_TOKEN = uatProdResponse
+                            echo "UAT/PROD OAuth Token obtained successfully."
+                        } else {
+                            error("Failed to obtain OAuth token for UAT/PROD.")
+                        }
+                    }
                 }
+                sleep(5)
             }
         }
 
-        // Stage 2: Unpublish in NPE (Optional)
         stage('Unpublish in NPE (Optional)') {
             when { expression { params.REPUBLISH_BEFORE_PROMOTE } }
             steps {
                 script {
                     def pipelines = params.PIPELINE_LIST.split("\n")
                     pipelines.each { pipeline ->
-                        def customer = pipeline.split("/")[0].trim()
-                        def name = pipeline.split("/")[1].trim()
-                        def capitalized_name = name.toUpperCase().replace("-", "_")
-                        def parentDAGFolder = "${params.DAG_PREFIX}${capitalized_name}"
-                        def body = """{ "customer": "${customer}", "name": "${name}", "bu": "ca", "parentDAGFolder": "${parentDAGFolder}" }"""
+                        try {
+                            def customer = pipeline.split("/")[0].trim()
+                            def name = pipeline.split("/")[1].trim()
+                            def capitalized_name = name.toUpperCase().replace("-", "_")
+                            def parentDAGFolder = "${params.DAG_PREFIX}${capitalized_name}"
 
-                        makeCurlRequest(env.NPE_UNPUBLISH_URL, env.NPE_TOKEN, body, pipeline, 'Unpublish NPE')
-                        sleep 5
+                            echo "Unpublishing pipeline ${pipeline} in NPE..."
+
+                            def body = """{ "customer": "${customer}", "name": "${name}", "bu": "ca", "parentDAGFolder": "${parentDAGFolder}" }"""
+                            sh(script: "curl -X POST ${NPE_UNPUBLISH_URL} -H 'Authorization: Bearer ${env.NPE_TOKEN}' -H 'Content-Type: application/json' -d '${body}' -k", returnStdout: true)
+                            
+                            pipelineResults[pipeline]["Unpublish NPE"] = "Success"
+                        } catch (Exception e) {
+                            pipelineResults[pipeline]["Unpublish NPE"] = "Error: ${e.message}"
+                        }
+                        sleep(5)
                     }
                 }
             }
         }
 
-        // Stage 3: Publish in NPE (Optional)
         stage('Publish in NPE (Optional)') {
             when { expression { params.REPUBLISH_BEFORE_PROMOTE } }
             steps {
                 script {
                     def pipelines = params.PIPELINE_LIST.split("\n")
                     pipelines.each { pipeline ->
-                        def customer = pipeline.split("/")[0].trim()
-                        def name = pipeline.split("/")[1].trim()
-                        def capitalized_name = name.toUpperCase().replace("-", "_")
-                        def parentDAGFolder = "${params.DAG_PREFIX}${capitalized_name}"
-                        def body = """{ "customer": "${customer}", "name": "${name}", "bu": "ca", "parentDAGFolder": "${parentDAGFolder}" }"""
+                        try {
+                            def customer = pipeline.split("/")[0].trim()
+                            def name = pipeline.split("/")[1].trim()
+                            def capitalized_name = name.toUpperCase().replace("-", "_")
+                            def parentDAGFolder = "${params.DAG_PREFIX}${capitalized_name}"
 
-                        makeCurlRequest(env.NPE_PUBLISH_URL, env.NPE_TOKEN, body, pipeline, 'Publish NPE')
-                        sleep 5
+                            echo "Publishing pipeline ${pipeline} in NPE..."
+
+                            def body = """{ "customer": "${customer}", "name": "${name}", "bu": "ca", "parentDAGFolder": "${parentDAGFolder}" }"""
+                            def publishResponse = sh(script: "curl -X POST ${NPE_PUBLISH_URL} -H 'Authorization: Bearer ${env.NPE_TOKEN}' -H 'Content-Type: application/json' -d '${body}' -k", returnStdout: true)
+
+                            pipelineResults[pipeline]["Publish NPE"] = "Success"
+                        } catch (Exception e) {
+                            pipelineResults[pipeline]["Publish NPE"] = "Error: ${e.message}"
+                        }
+                        sleep(5)
                     }
                 }
             }
         }
 
-        // Stage 4: Unpublish in UAT
         stage('Unpublish in UAT') {
             steps {
                 script {
                     def pipelines = params.PIPELINE_LIST.split("\n")
                     pipelines.each { pipeline ->
-                        def customer = pipeline.split("/")[0].trim()
-                        def name = pipeline.split("/")[1].trim()
-                        def capitalized_name = name.toUpperCase().replace("-", "_")
-                        def parentDAGFolder = "${params.DAG_PREFIX}${capitalized_name}"
-                        def body = """{ "customer": "${customer}", "name": "${name}", "bu": "ca", "parentDAGFolder": "${parentDAGFolder}" }"""
+                        try {
+                            def customer = pipeline.split("/")[0].trim()
+                            def name = pipeline.split("/")[1].trim()
+                            def capitalized_name = name.toUpperCase().replace("-", "_")
+                            def parentDAGFolder = "${params.DAG_PREFIX}${capitalized_name}"
 
-                        makeCurlRequest(env.UAT_UNPUBLISH_URL, env.UAT_PROD_TOKEN, body, pipeline, 'Unpublish UAT')
-                        sleep 5
+                            echo "Unpublishing pipeline ${pipeline} in UAT..."
+
+                            def body = """{ "customer": "${customer}", "name": "${name}", "bu": "ca", "parentDAGFolder": "${parentDAGFolder}" }"""
+                            sh(script: "curl -X POST ${UAT_UNPUBLISH_URL} -H 'Authorization: Bearer ${env.UAT_PROD_TOKEN}' -H 'Content-Type: application/json' -d '${body}' -k", returnStdout: true)
+
+                            pipelineResults[pipeline]["Unpublish UAT"] = "Success"
+                        } catch (Exception e) {
+                            pipelineResults[pipeline]["Unpublish UAT"] = "Error: ${e.message}"
+                        }
+                        sleep(5)
                     }
                 }
             }
         }
 
-        // Stage 5: Promote from NPE to UAT
         stage('Promote from NPE to UAT') {
             steps {
                 script {
                     def pipelines = params.PIPELINE_LIST.split("\n")
                     pipelines.each { pipeline ->
-                        def customer = pipeline.split("/")[0].trim()
-                        def name = pipeline.split("/")[1].trim()
-                        def capitalized_name = name.toUpperCase().replace("-", "_")
-                        def parentDAGFolder = "${params.DAG_PREFIX}${capitalized_name}"
-                        def body = """{ "customer": "${customer}", "name": "${name}", "bu": "ca", "parentDAGFolder": "${parentDAGFolder}", "bucket": "northamerica-northeast1-ca-gbp-consumer-uat" }"""
+                        try {
+                            def customer = pipeline.split("/")[0].trim()
+                            def name = pipeline.split("/")[1].trim()
+                            def capitalized_name = name.toUpperCase().replace("-", "_")
+                            def parentDAGFolder = "${params.DAG_PREFIX}${capitalized_name}"
 
-                        makeCurlRequest(env.PROMOTE_NPE_TO_UAT_URL, env.NPE_TOKEN, body, pipeline, 'Promote NPE to UAT')
-                        sleep time: 5, unit: 'MINUTES' // Wait for 5 minutes after promotion
+                            echo "Promoting pipeline ${pipeline} from NPE to UAT..."
+
+                            def body = """{ "customer": "${customer}", "name": "${name}", "bu": "ca", "parentDAGFolder": "${parentDAGFolder}", "bucket": "northamerica-northeast1-ca-gbp-consumer-uat" }"""
+                            def promoteResponse = sh(script: "curl -X POST ${PROMOTE_NPE_TO_UAT_URL} -H 'Authorization: Bearer ${env.NPE_TOKEN}' -H 'Content-Type: application/json' -d '${body}' -k", returnStdout: true)
+
+                            pipelineResults[pipeline]["Promote NPE to UAT"] = "Success"
+                        } catch (Exception e) {
+                            pipelineResults[pipeline]["Promote NPE to UAT"] = "Error: ${e.message}"
+                        }
+                        sleep(5)
                     }
+                    sleep(300)  // Wait for 5 minutes after promotion
                 }
             }
         }
 
-        // Stage 6: Publish in UAT
         stage('Publish in UAT') {
             steps {
                 script {
                     def pipelines = params.PIPELINE_LIST.split("\n")
                     pipelines.each { pipeline ->
-                        def customer = pipeline.split("/")[0].trim()
-                        def name = pipeline.split("/")[1].trim()
-                        def capitalized_name = name.toUpperCase().replace("-", "_")
-                        def parentDAGFolderUAT = "VALIDATION_${capitalized_name}"
-                        def body = """{ "customer": "${customer}", "name": "${name}", "bu": "ca", "parentDAGFolder": "${parentDAGFolderUAT}" }"""
+                        try {
+                            def customer = pipeline.split("/")[0].trim()
+                            def name = pipeline.split("/")[1].trim()
+                            def capitalized_name = name.toUpperCase().replace("-", "_")
+                            def parentDAGFolderUAT = "VALIDATION_${capitalized_name}"
 
-                        makeCurlRequest(env.UAT_PUBLISH_URL, env.UAT_PROD_TOKEN, body, pipeline, 'Publish UAT')
-                        sleep 5
+                            echo "Publishing pipeline ${pipeline} in UAT..."
+
+                            def bodyUAT = """{ "customer": "${customer}", "name": "${name}", "bu": "ca", "parentDAGFolder": "${parentDAGFolderUAT}" }"""
+                            def publishUATResponse = sh(script: "curl -X POST ${UAT_PUBLISH_URL} -H 'Authorization: Bearer ${env.UAT_PROD_TOKEN}' -H 'Content-Type: application/json' -d '${bodyUAT}' -k", returnStdout: true)
+
+                            pipelineResults[pipeline]["Publish UAT"] = "Success"
+                        } catch (Exception e) {
+                            pipelineResults[pipeline]["Publish UAT"] = "Error: ${e.message}"
+                        }
+                        sleep(5)
                     }
                 }
             }
         }
 
-        // Stage 7: Unpublish in PROD
+        // Additional Stages for PROD
+
         stage('Unpublish in PROD') {
             steps {
                 script {
                     def pipelines = params.PIPELINE_LIST.split("\n")
                     pipelines.each { pipeline ->
-                        def customer = pipeline.split("/")[0].trim()
-                        def name = pipeline.split("/")[1].trim()
-                        def capitalized_name = name.toUpperCase().replace("-", "_")
-                        def parentDAGFolder = "${params.DAG_PREFIX}${capitalized_name}"
-                        def body = """{ "customer": "${customer}", "name": "${name}", "bu": "ca", "parentDAGFolder": "${parentDAGFolder}" }"""
+                        try {
+                            def customer = pipeline.split("/")[0].trim()
+                            def name = pipeline.split("/")[1].trim()
+                            def capitalized_name = name.toUpperCase().replace("-", "_")
+                            def parentDAGFolder = "${params.DAG_PREFIX}${capitalized_name}"
 
-                        makeCurlRequest(env.PROD_UNPUBLISH_URL, env.UAT_PROD_TOKEN, body, pipeline, 'Unpublish PROD')
-                        sleep 5
+                            echo "Unpublishing pipeline ${pipeline} in PROD..."
+
+                            def bodyPROD = """{ "customer": "${customer}", "name": "${name}", "bu": "ca", "parentDAGFolder": "${parentDAGFolder}" }"""
+                            sh(script: "curl -X POST ${PROD_UNPUBLISH_URL} -H 'Authorization: Bearer ${env.UAT_PROD_TOKEN}' -H 'Content-Type: application/json' -d '${bodyPROD}' -k", returnStdout: true)
+
+                            pipelineResults[pipeline]["Unpublish PROD"] = "Success"
+                        } catch (Exception e) {
+                            pipelineResults[pipeline]["Unpublish PROD"] = "Error: ${e.message}"
+                        }
+                        sleep(5)
                     }
                 }
             }
         }
 
-        // Stage 8: Promote from UAT to PROD
         stage('Promote from UAT to PROD') {
             steps {
                 script {
                     def pipelines = params.PIPELINE_LIST.split("\n")
                     pipelines.each { pipeline ->
-                        def customer = pipeline.split("/")[0].trim()
-                        def name = pipeline.split("/")[1].trim()
-                        def capitalized_name = name.toUpperCase().replace("-", "_")
-                        def parentDAGFolder = "${params.DAG_PREFIX}${capitalized_name}"
-                        def body = """{ "customer": "${customer}", "name": "${name}", "bu": "ca", "parentDAGFolder": "${parentDAGFolder}", "bucket": "northamerica-northeast1-ca-gbp-consumer-prd" }"""
+                        try {
+                            def customer = pipeline.split("/")[0].trim()
+                            def name = pipeline.split("/")[1].trim()
+                            def capitalized_name = name.toUpperCase().replace("-", "_")
+                            def parentDAGFolder = "${params.DAG_PREFIX}${capitalized_name}"
 
-                        makeCurlRequest(env.PROMOTE_UAT_TO_PROD_URL, env.UAT_PROD_TOKEN, body, pipeline, 'Promote UAT to PROD')
-                        sleep time: 5, unit: 'MINUTES' // Wait for 5 minutes after promotion
+                            echo "Promoting pipeline ${pipeline} from UAT to PROD..."
+
+                            def body = """{ "customer": "${customer}", "name": "${name}", "bu": "ca", "parentDAGFolder": "${parentDAGFolder}", "bucket": "northamerica-northeast1-ca-gbp-consumer-prd" }"""
+                            def promoteResponse = sh(script: "curl -X POST ${PROMOTE_UAT_TO_PROD_URL} -H 'Authorization: Bearer ${env.UAT_PROD_TOKEN}' -H 'Content-Type: application/json' -d '${body}' -k", returnStdout: true)
+
+                            pipelineResults[pipeline]["Promote UAT to PROD"] = "Success"
+                        } catch (Exception e) {
+                            pipelineResults[pipeline]["Promote UAT to PROD"] = "Error: ${e.message}"
+                        }
+                        sleep(5)
                     }
+                    sleep(300)  // Wait for 5 minutes after promotion
                 }
             }
         }
 
-        // Stage 9: Publish in PROD
         stage('Publish in PROD') {
             steps {
                 script {
                     def pipelines = params.PIPELINE_LIST.split("\n")
                     pipelines.each { pipeline ->
-                        def customer = pipeline.split("/")[0].trim()
-                        def name = pipeline.split("/")[1].trim()
-                        def capitalized_name = name.toUpperCase().replace("-", "_")
-                        def parentDAGFolder = "${params.DAG_PREFIX}${capitalized_name}"
-                        def body = """{ "customer": "${customer}", "name": "${name}", "bu": "ca", "parentDAGFolder": "${parentDAGFolder}" }"""
+                        try {
+                            def customer = pipeline.split("/")[0].trim()
+                            def name = pipeline.split("/")[1].trim()
+                            def capitalized_name = name.toUpperCase().replace("-", "_")
+                            def parentDAGFolder = "${params.DAG_PREFIX}${capitalized_name}"
 
-                        makeCurlRequest(env.PROD_PUBLISH_URL, env.UAT_PROD_TOKEN, body, pipeline, 'Publish PROD')
-                        sleep 5
+                            echo "Publishing pipeline ${pipeline} in PROD..."
+
+                            def bodyPROD = """{ "customer": "${customer}", "name": "${name}", "bu": "ca", "parentDAGFolder": "${parentDAGFolder}" }"""
+                            def publishPRODResponse = sh(script: "curl -X POST ${PROD_PUBLISH_URL} -H 'Authorization: Bearer ${env.UAT_PROD_TOKEN}' -H 'Content-Type: application/json' -d '${bodyPROD}' -k", returnStdout: true)
+
+                            pipelineResults[pipeline]["Publish PROD"] = "Success"
+                        } catch (Exception e) {
+                            pipelineResults[pipeline]["Publish PROD"] = "Error: ${e.message}"
+                        }
+                        sleep(5)
                     }
                 }
             }
         }
 
-        // Stage 10: Unpublish in UAT (Optional)
-        stage('Unpublish in UAT (Optional) - lower env') {
+        stage('Unpublish in UAT (Optional)') {
             when { expression { !params.KEEP_PUBLISHED_IN_LOWER_ENV } }
             steps {
                 script {
                     def pipelines = params.PIPELINE_LIST.split("\n")
                     pipelines.each { pipeline ->
-                        def customer = pipeline.split("/")[0].trim()
-                        def name = pipeline.split("/")[1].trim()
-                        def capitalized_name = name.toUpperCase().replace("-", "_")
-                        def parentDAGFolder = "VALIDATION_${capitalized_name}"
-                        def body = """{ "customer": "${customer}", "name": "${name}", "bu": "ca", "parentDAGFolder": "${parentDAGFolder}" }"""
+                        try {
+                            def customer = pipeline.split("/")[0].trim()
+                            def name = pipeline.split("/")[1].trim()
+                            def capitalized_name = name.toUpperCase().replace("-", "_")
 
-                        makeCurlRequest(env.UAT_UNPUBLISH_URL, env.UAT_PROD_TOKEN, body, pipeline, 'Unpublish UAT')
-                        sleep 5
+                            echo "Unpublishing pipeline ${pipeline} in UAT..."
+
+                            def bodyUAT = """{ "customer": "${customer}", "name": "${name}", "bu": "ca", "parentDAGFolder": "VALIDATION_${capitalized_name}" }"""
+                            sh(script: "curl -X POST ${UAT_UNPUBLISH_URL} -H 'Authorization: Bearer ${env.UAT_PROD_TOKEN}' -H 'Content-Type: application/json' -d '${bodyUAT}' -k", returnStdout: true)
+
+                            pipelineResults[pipeline]["Unpublish UAT (Optional)"] = "Success"
+                        } catch (Exception e) {
+                            pipelineResults[pipeline]["Unpublish UAT (Optional)"] = "Error: ${e.message}"
+                        }
+                        sleep(5)
                     }
                 }
             }
         }
+    }
 
-        // Stage 11: Send Email Report
-        stage('Send Email Report') {
-            steps {
-                script {
-                    def htmlContent = """<html><body><h2>Pipeline Promotion Job Summary</h2><table border='1'><tr><th>Pipeline</th><th>Unpublish NPE</th><th>Publish NPE</th><th>Unpublish UAT</th><th>Promote NPE to UAT</th><th>Publish UAT</th><th>Unpublish PROD</th><th>Promote UAT to PROD</th><th>Publish PROD</th><th>Unpublish UAT</th></tr>"""
-                    pipelineResults.each { pipeline, results ->
-                        htmlContent += "<tr><td>${pipeline}</td><td>${results['Unpublish NPE'] ?: 'N/A'}</td><td>${results['Publish NPE'] ?: 'N/A'}</td><td>${results['Unpublish UAT'] ?: 'N/A'}</td><td>${results['Promote NPE to UAT'] ?: 'N/A'}</td><td>${results['Publish UAT'] ?: 'N/A'}</td><td>${results['Unpublish PROD'] ?: 'N/A'}</td><td>${results['Promote UAT to PROD'] ?: 'N/A'}</td><td>${results['Publish PROD'] ?: 'N/A'}</td><td>${results['Unpublish UAT'] ?: 'N/A'}</td></tr>"
-                    }
-                    htmlContent += "</table></body></html>"
-                    writeFile file: "pipeline_promotion_summary.html", text: htmlContent
-                    archiveArtifacts artifacts: "pipeline_promotion_summary.html"
-                    emailext(subject: "Pipeline Promotion Job Report", body: htmlContent, mimeType: 'text/html', to: params.EMAIL_RECIPIENTS, attachmentsPattern: "pipeline_promotion_summary.html")
+    post {
+        always {
+            script {
+                // Build the HTML table for email summary
+                def htmlContent = """
+                <html>
+                <body>
+                <h2>Pipeline Promotion Job Summary</h2>
+                <table border="1" cellpadding="5">
+                    <tr>
+                        <th>Pipeline</th>
+                        <th>Unpublish NPE</th>
+                        <th>Publish NPE</th>
+                        <th>Unpublish UAT</th>
+                        <th>Promote NPE to UAT</th>
+                        <th>Publish UAT</th>
+                        <th>Unpublish PROD</th>
+                        <th>Promote UAT to PROD</th>
+                        <th>Publish PROD</th>
+                        <th>Unpublish UAT (Optional)</th>
+                    </tr>
+                """
+
+                // Populate the table with pipeline results
+                pipelineResults.each { pipeline, results ->
+                    htmlContent += "<tr>"
+                    htmlContent += "<td>${pipeline}</td>"
+                    htmlContent += "<td>${results['Unpublish NPE'] ?: 'N/A'}</td>"
+                    htmlContent += "<td>${results['Publish NPE'] ?: 'N/A'}</td>"
+                    htmlContent += "<td>${results['Unpublish UAT'] ?: 'N/A'}</td>"
+                    htmlContent += "<td>${results['Promote NPE to UAT'] ?: 'N/A'}</td>"
+                    htmlContent += "<td>${results['Publish UAT'] ?: 'N/A'}</td>"
+                    htmlContent += "<td>${results['Unpublish PROD'] ?: 'N/A'}</td>"
+                    htmlContent += "<td>${results['Promote UAT to PROD'] ?: 'N/A'}</td>"
+                    htmlContent += "<td>${results['Publish PROD'] ?: 'N/A'}</td>"
+                    htmlContent += "<td>${results['Unpublish UAT (Optional)'] ?: 'N/A'}</td>"
+                    htmlContent += "</tr>"
                 }
+
+                htmlContent += "</table></body></html>"
+
+                // Write the HTML content to a file
+                def summaryFile = "pipeline_promotion_summary.html"
+                writeFile file: summaryFile, text: htmlContent
+
+                // Archive the report in Jenkins
+                archiveArtifacts artifacts: summaryFile
+
+                // Send the email with the report as an attachment
+                emailext(
+                    subject: "Pipeline Promotion Job Report",
+                    body: htmlContent,
+                    mimeType: 'text/html',
+                    to: params.EMAIL_RECIPIENTS,
+                    attachLog: false,
+                    attachmentsPattern: summaryFile
+                )
             }
         }
     }
