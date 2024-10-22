@@ -374,3 +374,182 @@ pipeline {
         }
     }
 }
+----
+// Define pipelineResults globally outside the pipeline block
+def pipelineResults = [:]
+
+pipeline {
+    agent any
+
+    parameters {
+        text(name: 'PIPELINE_LIST', description: 'List of pipelines to promote (one pipeline per line)')
+        string(name: 'DAG_PREFIX', defaultValue: 'CAGBPOFLN_', description: 'DAG Prefix for NPE/PROD, default: CAGBPOFLN_')
+        booleanParam(name: 'REPUBLISH_BEFORE_PROMOTE', defaultValue: false, description: 'Republish before promoting?')
+        booleanParam(name: 'KEEP_PUBLISHED_IN_LOWER_ENV', defaultValue: false, description: 'Keep published in lower environment after promoting?')
+        string(name: 'EMAIL_RECIPIENTS', defaultValue: 'team@example.com', description: 'Comma-separated list of email recipients for the report')
+    }
+
+    environment {
+        NPE_UNPUBLISH_URL = "https://global-batch-app.alpha.dfds.ca-nane1.gcp.efx/config/unpublish"
+        NPE_PUBLISH_URL = "https://global-batch-app.alpha.dfds.ca-nane1.gcp.efx/config/publish"
+        UAT_UNPUBLISH_URL = "https://global-batch-app.uat.dfds.ca-nane1.gcp.efx/config/unpublish"
+        UAT_PUBLISH_URL = "https://global-batch-app.uat.dfds.ca-nane1.gcp.efx/config/publish"
+        PROD_UNPUBLISH_URL = "https://global-batch-app.prd.dfds.ca-nane1.gcp.efx/config/unpublish"
+        PROD_PUBLISH_URL = "https://global-batch-app.prd.dfds.ca-nane1.gcp.efx/config/publish"
+        PROMOTE_NPE_TO_UAT_URL = "https://global-batch-app.alpha.dfds.ca-nane1.gcp.efx/config/promote"
+        PROMOTE_UAT_TO_PROD_URL = "https://global-batch-app.uat.dfds.ca-nane1.gcp.efx/config/promote"
+    }
+
+    stages {
+        // Example for "Unpublish in NPE"
+        stage('Unpublish in NPE (Optional)') {
+            when { expression { params.REPUBLISH_BEFORE_PROMOTE } }
+            steps {
+                script {
+                    def pipelines = params.PIPELINE_LIST.split("\n")
+                    for (pipeline in pipelines) {
+                        pipelineResults[pipeline] = [:]
+                        try {
+                            def customer = pipeline.split("/")[0].trim()
+                            def name = pipeline.split("/")[1].trim()
+                            def capitalized_name = name.toUpperCase().replace("-", "_")
+                            def parentDAGFolder = "${params.DAG_PREFIX}${capitalized_name}"
+
+                            echo "Unpublishing pipeline ${pipeline} in NPE..."
+
+                            def body = """{ "customer": "${customer}", "name": "${name}", "bu": "ca", "parentDAGFolder": "${parentDAGFolder}" }"""
+                            def apiResponse = sh(script: "curl -X POST ${NPE_UNPUBLISH_URL} -H 'Content-Type: application/json' -d '${body}' -k", returnStdout: true).trim()
+
+                            // Print the API response to console
+                            echo "API Response: ${apiResponse}"
+
+                            // Check for errors in response
+                            if (apiResponse.contains("ValidationException") || apiResponse.contains("error") || apiResponse.contains("fail")) {
+                                pipelineResults[pipeline]["Unpublish NPE"] = "Error: ${apiResponse}"
+                                error("Error found in Unpublish NPE for ${pipeline}. Stopping the job.")
+                            }
+
+                            // Log success if no errors
+                            pipelineResults[pipeline]["Unpublish NPE"] = "Success"
+                        } catch (Exception e) {
+                            pipelineResults[pipeline]["Unpublish NPE"] = "Error: ${e.message}"
+                        }
+
+                        sleep(5)
+                    }
+                }
+            }
+        }
+
+        // Example for "Publish in NPE"
+        stage('Publish in NPE (Optional)') {
+            when { expression { params.REPUBLISH_BEFORE_PROMOTE } }
+            steps {
+                script {
+                    def pipelines = params.PIPELINE_LIST.split("\n")
+                    for (pipeline in pipelines) {
+                        pipelineResults[pipeline] = [:]
+                        try {
+                            def customer = pipeline.split("/")[0].trim()
+                            def name = pipeline.split("/")[1].trim()
+                            def capitalized_name = name.toUpperCase().replace("-", "_")
+                            def parentDAGFolder = "${params.DAG_PREFIX}${capitalized_name}"
+
+                            echo "Publishing pipeline ${pipeline} in NPE..."
+
+                            def body = """{ "customer": "${customer}", "name": "${name}", "bu": "ca", "parentDAGFolder": "${parentDAGFolder}" }"""
+                            def apiResponse = sh(script: "curl -X POST ${NPE_PUBLISH_URL} -H 'Content-Type: application/json' -d '${body}' -k", returnStdout: true).trim()
+
+                            // Print the API response to console
+                            echo "API Response: ${apiResponse}"
+
+                            // Check for errors in response
+                            if (apiResponse.contains("ValidationException") || apiResponse.contains("error") || apiResponse.contains("fail")) {
+                                pipelineResults[pipeline]["Publish NPE"] = "Error: ${apiResponse}"
+                                error("Error found in Publish NPE for ${pipeline}. Stopping the job.")
+                            }
+
+                            pipelineResults[pipeline]["Publish NPE"] = "Success"
+                        } catch (Exception e) {
+                            pipelineResults[pipeline]["Publish NPE"] = "Error: ${e.message}"
+                        }
+
+                        sleep(5)
+                    }
+                }
+            }
+        }
+
+        // Continue similarly for other stages...
+        // You can follow this pattern for all steps such as Unpublish in UAT, Promote from NPE to UAT, Publish in UAT, etc.
+
+        // Step 3: Unpublish in UAT
+        // Step 4: Promote from NPE to UAT
+        // Step 5: Publish in UAT
+        // Step 6: Unpublish in NPE (Optional)
+        // Step 7: Unpublish in PROD
+        // Step 8: Promote from UAT to PROD
+        // Step 9: Publish in PROD
+        // Step 10: Unpublish in UAT (Optional)
+
+    }
+
+    post {
+        always {
+            script {
+                // Generate the summary report for email
+                def htmlContent = """
+                <html>
+                <body>
+                <h2>Pipeline Promotion Job Summary</h2>
+                <table border="1" cellpadding="5">
+                    <tr>
+                        <th>Pipeline</th>
+                        <th>Unpublish NPE</th>
+                        <th>Publish NPE</th>
+                        <th>Unpublish UAT</th>
+                        <th>Promote NPE to UAT</th>
+                        <th>Publish UAT</th>
+                        <th>Unpublish PROD</th>
+                        <th>Promote UAT to PROD</th>
+                        <th>Publish PROD</th>
+                        <th>Unpublish UAT (Optional)</th>
+                    </tr>
+                """
+                pipelineResults.each { pipeline, results ->
+                    htmlContent += "<tr>"
+                    htmlContent += "<td>${pipeline}</td>"
+                    htmlContent += "<td>${results['Unpublish NPE'] ?: 'N/A'}</td>"
+                    htmlContent += "<td>${results['Publish NPE'] ?: 'N/A'}</td>"
+                    htmlContent += "<td>${results['Unpublish UAT'] ?: 'N/A'}</td>"
+                    htmlContent += "<td>${results['Promote NPE to UAT'] ?: 'N/A'}</td>"
+                    htmlContent += "<td>${results['Publish UAT'] ?: 'N/A'}</td>"
+                    htmlContent += "<td>${results['Unpublish PROD'] ?: 'N/A'}</td>"
+                    htmlContent += "<td>${results['Promote UAT to PROD'] ?: 'N/A'}</td>"
+                    htmlContent += "<td>${results['Publish PROD'] ?: 'N/A'}</td>"
+                    htmlContent += "<td>${results['Unpublish UAT (Optional)'] ?: 'N/A'}</td>"
+                    htmlContent += "</tr>"
+                }
+                htmlContent += "</table></body></html>"
+
+                // Write the HTML content to a file
+                def summaryFile = "pipeline_promotion_summary.html"
+                writeFile file: summaryFile, text: htmlContent
+
+                // Archive the report in Jenkins
+                archiveArtifacts artifacts: summaryFile
+
+                // Send the email with the report as an attachment
+                emailext(
+                    subject: "Pipeline Promotion Job Report",
+                    body: htmlContent,
+                    mimeType: 'text/html',
+                    to: params.EMAIL_RECIPIENTS,
+                    attachLog: false,
+                    attachmentsPattern: summaryFile
+                )
+            }
+        }
+    }
+}
+--
