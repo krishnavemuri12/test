@@ -553,3 +553,146 @@ pipeline {
     }
 }
 --
+// Define pipelineResults globally outside the pipeline block
+def pipelineResults = [:]
+
+pipeline {
+    agent any
+
+    parameters {
+        text(name: 'PIPELINE_LIST', description: 'List of pipelines to promote (one pipeline per line)')
+        string(name: 'DAG_PREFIX', defaultValue: 'CAGBPOFLN_', description: 'DAG Prefix for NPE/PROD, default: CAGBPOFLN_')
+        booleanParam(name: 'REPUBLISH_BEFORE_PROMOTE', defaultValue: false, description: 'Republish before promoting?')
+        booleanParam(name: 'KEEP_PUBLISHED_IN_LOWER_ENV', defaultValue: false, description: 'Keep published in lower environment after promoting?')
+        string(name: 'EMAIL_RECIPIENTS', defaultValue: 'team@example.com', description: 'Comma-separated list of email recipients for the report')
+    }
+
+    stages {
+        // Step 1: Unpublish in NPE (Optional)
+        stage('Unpublish in NPE (Optional)') {
+            when { expression { params.REPUBLISH_BEFORE_PROMOTE } }
+            steps {
+                script {
+                    def pipelines = params.PIPELINE_LIST.split("\n")
+                    for (pipeline in pipelines) {
+                        pipelineResults[pipeline] = [:]  // Initialize result for this pipeline
+                        try {
+                            def customer = pipeline.split("/")[0].trim()
+                            def name = pipeline.split("/")[1].trim()
+                            def capitalized_name = name.toUpperCase().replace("-", "_")
+                            def parentDAGFolder = "${params.DAG_PREFIX}${capitalized_name}"
+
+                            echo "Unpublishing pipeline ${pipeline} in NPE..."
+
+                            // One-liner to capture API response and check for errors
+                            def apiResponse = sh(script: """curl -s -X POST ${NPE_UNPUBLISH_URL} \
+                                -H 'Authorization: Bearer ${env.NPE_TOKEN}' \
+                                -H 'Content-Type: application/json' \
+                                -d '{ "customer": "${customer}", "name": "${name}", "bu": "ca", "parentDAGFolder": "${parentDAGFolder}" }' -k""", returnStdout: true).trim()
+
+                            echo "API Response: ${apiResponse}"
+
+                            if (apiResponse.contains("fail") || apiResponse.contains("error") || apiResponse.contains("ValidationException") || apiResponse.contains("timeout")) {
+                                throw new Exception("API Error Detected: ${apiResponse}")
+                            }
+                            // Mark success
+                            pipelineResults[pipeline]["Unpublish NPE"] = "Success"
+                        } catch (Exception e) {
+                            // Log failure
+                            pipelineResults[pipeline]["Unpublish NPE"] = "Error: ${e.message}"
+                            error "Pipeline failed during Unpublish NPE step. Error: ${e.message}"
+                        }
+                        sleep time: 5, unit: 'SECONDS' // Delay between steps
+                    }
+                }
+            }
+        }
+
+        // Step 5: Publish in UAT
+        stage('Publish in UAT') {
+            steps {
+                script {
+                    def pipelines = params.PIPELINE_LIST.split("\n")
+                    for (pipeline in pipelines) {
+                        pipelineResults[pipeline] = [:]  // Initialize result for this pipeline
+                        try {
+                            def customer = pipeline.split("/")[0].trim()
+                            def name = pipeline.split("/")[1].trim()
+                            def capitalized_name = name.toUpperCase().replace("-", "_")
+                            def parentDAGFolderUAT = "VALIDATION_${capitalized_name}"
+
+                            echo "Publishing pipeline ${pipeline} in UAT..."
+
+                            // One-liner to capture API response and check for errors
+                            def apiResponse = sh(script: """curl -s -X POST ${UAT_PUBLISH_URL} \
+                                -H 'Authorization: Bearer ${env.UAT_PROD_TOKEN}' \
+                                -H 'Content-Type: application/json' \
+                                -d '{ "customer": "${customer}", "name": "${name}", "bu": "ca", "parentDAGFolder": "${parentDAGFolderUAT}" }' -k""", returnStdout: true).trim()
+
+                            echo "API Response: ${apiResponse}"
+
+                            if (apiResponse.contains("fail") || apiResponse.contains("error") || apiResponse.contains("ValidationException") || apiResponse.contains("timeout")) {
+                                throw new Exception("API Error Detected: ${apiResponse}")
+                            }
+                            // Mark success
+                            pipelineResults[pipeline]["Publish UAT"] = "Success"
+                        } catch (Exception e) {
+                            // Log failure
+                            pipelineResults[pipeline]["Publish UAT"] = "Error: ${e.message}"
+                            error "Pipeline failed during Publish in UAT step. Error: ${e.message}"
+                        }
+                        sleep time: 5, unit: 'SECONDS' // Delay between steps
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                // Build the HTML table for email summary
+                def htmlContent = """
+                <html>
+                <body>
+                <h2>Pipeline Promotion Job Summary</h2>
+                <table border="1" cellpadding="5">
+                    <tr>
+                        <th>Pipeline</th>
+                        <th>Unpublish NPE</th>
+                        <th>Publish UAT</th>
+                    </tr>
+                """
+
+                // Populate the table with pipeline results
+                pipelineResults.each { pipeline, results ->
+                    htmlContent += "<tr>"
+                    htmlContent += "<td>${pipeline}</td>"
+                    htmlContent += "<td>${results['Unpublish NPE'] ?: 'Not Executed'}</td>"
+                    htmlContent += "<td>${results['Publish UAT'] ?: 'Not Executed'}</td>"
+                    htmlContent += "</tr>"
+                }
+
+                htmlContent += "</table></body></html>"
+
+                // Write the HTML content to a file
+                def summaryFile = "pipeline_promotion_summary.html"
+                writeFile file: summaryFile, text: htmlContent
+
+                // Archive the report in Jenkins
+                archiveArtifacts artifacts: summaryFile
+
+                // Send the email with the report as an attachment
+                emailext(
+                    subject: "Pipeline Promotion Job Report",
+                    body: htmlContent,
+                    mimeType: 'text/html',
+                    to: params.EMAIL_RECIPIENTS,
+                    attachLog: false,
+                    attachmentsPattern: summaryFile
+                )
+            }
+        }
+    }
+}
+
