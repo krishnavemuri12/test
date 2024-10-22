@@ -438,3 +438,61 @@ pipeline {
         }
     }
 }
+----------
+
+stage('Unpublish in NPE (Optional)') {
+    when { expression { params.REPUBLISH_BEFORE_PROMOTE } }
+    steps {
+        script {
+            def pipelines = params.PIPELINE_LIST.split("\n")
+            for (pipeline in pipelines) {
+                // Initialize result for this pipeline
+                pipelineResults[pipeline] = [:]
+                try {
+                    def customer = pipeline.split("/")[0].trim()
+                    def name = pipeline.split("/")[1].trim()
+                    def capitalized_name = name.toUpperCase().replace("-", "_")
+                    def parentDAGFolder = "${params.DAG_PREFIX}${capitalized_name}"
+                    
+                    echo "Unpublishing pipeline ${pipeline} in NPE..."
+                    
+                    // Prepare the curl command
+                    def body = """{ "customer": "${customer}", "name": "${name}", "bu": "ca", "parentDAGFolder": "${parentDAGFolder}" }"""
+                    def curlCommand = """
+                        curl -v -X POST '${NPE_UNPUBLISH_URL}' \
+                        -H 'Authorization: Bearer ${env.NPE_TOKEN}' \
+                        -H 'Content-Type: application/json' \
+                        -d '${body}' \
+                        -k
+                    """
+                    
+                    // Echo the command (optional, remove in production if sensitive)
+                    echo "Executing curl command: ${curlCommand}"
+                    
+                    // Execute the command
+                    def response = sh(
+                        script: curlCommand,
+                        returnStdout: true
+                    ).trim()
+                    
+                    // Echo the response
+                    echo "Response: ${response}"
+                    
+                    // Log success
+                    pipelineResults[pipeline]["Unpublish NPE"] = "Success"
+                    
+                } catch (Exception e) {
+                    echo "Error occurred: ${e.message}"
+                    // Log failure
+                    pipelineResults[pipeline]["Unpublish NPE"] = "Error: ${e.message}"
+                    currentBuild.result = 'FAILURE'
+                }
+                
+                echo "Waiting 5 seconds before next operation..."
+                sleep time: 5, unit: 'SECONDS'
+            }
+        }
+    }
+}
+
+-----
