@@ -1,0 +1,36 @@
+stage('Publish in UAT') {
+            when { expression { params.PROMOTION_FLOW == 'NPE->UAT->PROD' || params.PROMOTION_FLOW == 'NPE->UAT' || ( params.PROMOTION_FLOW == 'UAT->PROD' && params.REPUBLISH_BEFORE_PROMOTE ) } }
+            steps {
+                script {
+                    def pipelines = params.PIPELINE_LIST.split("\n")
+                    for (pipeline in pipelines) {
+                        if (!pipelineResults.containsKey(pipeline)) {
+                            pipelineResults[pipeline] = [:]
+                        }
+                        try {
+                            def customer = pipeline.split("/")[0].trim()
+                            def name = pipeline.split("/")[1].trim()
+                            def capitalized_name = name.toUpperCase().replace("-", "_")
+                            def parentDAGFolder = "VALIDATION_${capitalized_name}"
+
+                            echo "Publishing pipeline ${pipeline} in UAT..."
+                            def body = """{ "customer": "${customer}", "name": "${name}", "bu": "ca", "parentDAGFolder": "${parentDAGFolder}" }"""
+                            def apiResponse = sh(script: "curl -X POST ${UAT_PUBLISH_URL} -H 'Authorization: Bearer ${env.UAT_PROD_TOKEN}' -H 'Content-Type: application/json' -d '${body}' -k", returnStdout: true).trim()
+
+                            echo "API Response: ${apiResponse}"
+
+                            if (apiResponse.contains("fail") || apiResponse.contains("error") || apiResponse.contains("ValidationException") || apiResponse.contains("timeout")) {
+                                pipelineResults[pipeline]["Publish UAT"] = "Error: ${apiResponse}"
+                                error("Error in Publish UAT: ${apiResponse}")
+                            } else {
+                                pipelineResults[pipeline]["Publish UAT"] = "PASS"
+                            }
+                        } catch (Exception e) {
+                            pipelineResults[pipeline]["Publish UAT"] = "Error: ${e.message}"
+                            error("Caught Exception in Publish UAT: ${e.message}")
+                        }
+                        sleep time: 5, unit: 'SECONDS'
+                    }
+                }
+            }
+        }
